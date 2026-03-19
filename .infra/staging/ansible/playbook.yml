@@ -552,6 +552,18 @@
         state: restarted
       tags: [stage2]
 
+    - name: Restart Horizon
+      systemd:
+        name: laravel-horizon
+        state: restarted
+      tags: [stage2]
+
+    - name: Restart Reverb
+      systemd:
+        name: laravel-reverb
+        state: restarted
+      tags: [stage2]
+
   # =========================================================================
   # Handlers
   # =========================================================================
