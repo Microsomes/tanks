@@ -1,0 +1,7 @@
+vendor/
+node_modules/
+.git/
+.idea/
+.vscode/
+storage/logs/*.log
+.env.backup

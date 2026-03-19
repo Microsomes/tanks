@@ -1,0 +1,98 @@
+services:
+  app:
+    build:
+      context: .docker/dev/php
+      dockerfile: Dockerfile
+    container_name: laravel-app
+    restart: unless-stopped
+    working_dir: /var/www/html
+    volumes:
+      - .:/var/www/html
+    networks:
+      - laravel
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  nginx:
+    build:
+      context: .docker/dev/nginx
+      dockerfile: Dockerfile
+    container_name: laravel-nginx
+    restart: unless-stopped
+    ports:
+      - "9005:80"
+    volumes:
+      - .:/var/www/html
+    networks:
+      - laravel
+    depends_on:
+      - app
+
+  mariadb:
+    image: mariadb:11
+    container_name: laravel-mariadb
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: secret
+      MYSQL_DATABASE: laravel
+      MYSQL_USER: laravel
+      MYSQL_PASSWORD: secret
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - laravel
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-psecret"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  node:
+    build:
+      context: .docker/dev/php
+      dockerfile: Dockerfile
+    container_name: laravel-node
+    restart: unless-stopped
+    working_dir: /var/www/html
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/var/www/html
+    networks:
+      - laravel
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    command: sh -c "npm install && npm run dev"
+
+  redis:
+    image: redis:alpine
+    container_name: laravel-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - laravel
+
+  mailpit:
+    image: axllent/mailpit
+    container_name: laravel-mailpit
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+    networks:
+      - laravel
+
+networks:
+  laravel:
+    driver: bridge
+
+volumes:
+  mariadb_data:
+    driver: local
