@@ -2,6 +2,7 @@
 import { Head, Link } from '@inertiajs/vue3';
 import { dashboard, login, register } from '@/routes';
 import { onMounted, onUnmounted, reactive, ref } from 'vue';
+import ToastNotification from '@/components/ToastNotification.vue';
 import Echo from 'laravel-echo';
 import Pusher from 'pusher-js';
 import {
@@ -304,6 +305,7 @@ const techStack = [
 
 <template>
     <Head title="Welcome" />
+    <ToastNotification />
 
     <!-- Cursor + Particle overlay -->
     <div class="pointer-events-none fixed inset-0 z-50 overflow-hidden">
