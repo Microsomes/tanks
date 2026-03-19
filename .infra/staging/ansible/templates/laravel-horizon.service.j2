@@ -1,0 +1,16 @@
+[Unit]
+Description=Laravel Horizon Queue Worker
+After=network.target redis-server.service mariadb.service
+
+[Service]
+User={{ deploy_user }}
+Group=www-data
+WorkingDirectory={{ app_path }}
+ExecStart=/usr/bin/php{{ php_version }} artisan horizon
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/laravel-horizon.log
+StandardError=append:/var/log/laravel-horizon.log
+
+[Install]
+WantedBy=multi-user.target

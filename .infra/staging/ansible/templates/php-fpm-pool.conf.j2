@@ -1,0 +1,20 @@
+[laravel]
+user = {{ deploy_user }}
+group = www-data
+
+listen = /run/php/php{{ php_version }}-fpm-laravel.sock
+listen.owner = www-data
+listen.group = www-data
+listen.mode = 0660
+
+pm = dynamic
+pm.max_children = 10
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+pm.max_requests = 500
+
+php_admin_value[error_log] = /var/log/php{{ php_version }}-fpm-laravel-error.log
+php_admin_flag[log_errors] = on
+
+clear_env = no

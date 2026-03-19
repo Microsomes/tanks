@@ -1,15 +1,30 @@
 ---
-- name: Setup staging server
+- name: Staging server setup
   hosts: staging
   become: true
 
+  vars_files:
+    - ../config.yml
+
+  # =========================================================================
+  # STAGE 1: Install packages, configure services, generate deploy key
+  # Run: ansible-playbook -i inventory.ini playbook.yml --tags stage1
+  # =========================================================================
   tasks:
+
+    # --- System -----------------------------------------------------------
     - name: Update apt cache
       apt:
         update_cache: true
         cache_valid_time: 3600
+      tags: [stage1]
 
-    - name: Install prerequisites
+    - name: Upgrade all packages
+      apt:
+        upgrade: dist
+      tags: [stage1]
+
+    - name: Install base packages
       apt:
         name:
           - apt-transport-https
@@ -18,60 +33,550 @@
           - gnupg
           - lsb-release
           - ufw
+          - git
+          - unzip
+          - acl
+          - software-properties-common
         state: present
+      tags: [stage1]
 
-    - name: Add Docker GPG key
-      shell: |
-        install -m 0755 -d /etc/apt/keyrings
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-        chmod a+r /etc/apt/keyrings/docker.asc
-      args:
-        creates: /etc/apt/keyrings/docker.asc
+    # --- Deploy user ------------------------------------------------------
+    - name: Create deploy user
+      user:
+        name: "{{ deploy_user }}"
+        shell: /bin/bash
+        create_home: true
+        groups: www-data
+        append: true
+      tags: [stage1]
 
-    - name: Add Docker repository
-      shell: |
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources-list.d/docker.list
-      args:
-        creates: /etc/apt/sources-list.d/docker.list
+    - name: Allow deploy user to restart services
+      copy:
+        dest: /etc/sudoers.d/deploy
+        content: |
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart php{{ php_version }}-fpm
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart nginx
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart laravel-horizon
+          {{ deploy_user }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart laravel-reverb
+        validate: visudo -cf %s
+        mode: "0440"
+      tags: [stage1]
 
-    - name: Install Docker
+    # --- PHP 8.5 via ondrej PPA ------------------------------------------
+    - name: Add ondrej PHP PPA
+      apt_repository:
+        repo: ppa:ondrej/php
+        state: present
+      tags: [stage1]
+
+    - name: Install PHP {{ php_version }} and extensions
       apt:
         name:
-          - docker-ce
-          - docker-ce-cli
-          - containerd.io
-          - docker-compose-plugin
+          - "php{{ php_version }}-fpm"
+          - "php{{ php_version }}-cli"
+          - "php{{ php_version }}-common"
+          - "php{{ php_version }}-mysql"
+          - "php{{ php_version }}-zip"
+          - "php{{ php_version }}-gd"
+          - "php{{ php_version }}-mbstring"
+          - "php{{ php_version }}-curl"
+          - "php{{ php_version }}-xml"
+          - "php{{ php_version }}-bcmath"
+          - "php{{ php_version }}-intl"
+          - "php{{ php_version }}-redis"
+          - "php{{ php_version }}-readline"
+          - "php{{ php_version }}-exif"
         state: present
         update_cache: true
+      tags: [stage1]
 
-    - name: Start and enable Docker
+    - name: Deploy PHP-FPM pool config
+      template:
+        src: templates/php-fpm-pool.conf.j2
+        dest: "/etc/php/{{ php_version }}/fpm/pool.d/laravel.conf"
+        mode: "0644"
+      tags: [stage1]
+
+    - name: Remove default PHP-FPM pool
+      file:
+        path: "/etc/php/{{ php_version }}/fpm/pool.d/www.conf"
+        state: absent
+      tags: [stage1]
+
+    - name: Deploy PHP production settings
+      template:
+        src: templates/php.ini.j2
+        dest: "/etc/php/{{ php_version }}/fpm/conf.d/99-production.ini"
+        mode: "0644"
+      tags: [stage1]
+
+    - name: Enable and start PHP-FPM
       systemd:
-        name: docker
+        name: "php{{ php_version }}-fpm"
         state: started
         enabled: true
+      tags: [stage1]
 
-    - name: Configure UFW - allow SSH
+    # --- Nginx ------------------------------------------------------------
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+      tags: [stage1]
+
+    - name: Remove default Nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      tags: [stage1]
+
+    - name: Deploy Nginx site config
+      template:
+        src: templates/nginx-site.conf.j2
+        dest: "/etc/nginx/sites-available/{{ app_name }}.conf"
+        mode: "0644"
+      tags: [stage1]
+
+    - name: Enable Nginx site
+      file:
+        src: "/etc/nginx/sites-available/{{ app_name }}.conf"
+        dest: "/etc/nginx/sites-enabled/{{ app_name }}.conf"
+        state: link
+      tags: [stage1]
+
+    - name: Enable and start Nginx
+      systemd:
+        name: nginx
+        state: started
+        enabled: true
+      tags: [stage1]
+
+    # --- MariaDB ----------------------------------------------------------
+    - name: Install MariaDB
+      apt:
+        name:
+          - mariadb-server
+          - mariadb-client
+          - python3-pymysql
+        state: present
+      tags: [stage1]
+
+    - name: Start and enable MariaDB
+      systemd:
+        name: mariadb
+        state: started
+        enabled: true
+      tags: [stage1]
+
+    - name: Set MariaDB root password
+      mysql_user:
+        name: root
+        password: "{{ db_root_password }}"
+        host: localhost
+        login_unix_socket: /run/mysqld/mysqld.sock
+        login_user: root
+        login_password: "{{ db_root_password }}"
+      tags: [stage1]
+
+    - name: Save root credentials to /root/.my.cnf
+      copy:
+        dest: /root/.my.cnf
+        content: |
+          [client]
+          user=root
+          password={{ db_root_password }}
+        mode: "0600"
+      tags: [stage1]
+
+    - name: Create application database
+      mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_user: root
+        login_password: "{{ db_root_password }}"
+      tags: [stage1]
+
+    - name: Create database user
+      mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        priv: "{{ db_name }}.*:ALL"
+        host: localhost
+        login_user: root
+        login_password: "{{ db_root_password }}"
+        state: present
+      tags: [stage1]
+
+    - name: Remove anonymous MySQL users
+      mysql_user:
+        name: ""
+        host_all: true
+        state: absent
+        login_user: root
+        login_password: "{{ db_root_password }}"
+      tags: [stage1]
+
+    # --- Redis ------------------------------------------------------------
+    - name: Install Redis
+      apt:
+        name: redis-server
+        state: present
+      tags: [stage1]
+
+    - name: Bind Redis to localhost only
+      lineinfile:
+        path: /etc/redis/redis.conf
+        regexp: "^bind "
+        line: "bind 127.0.0.1 ::1"
+      notify: restart redis
+      tags: [stage1]
+
+    - name: Start and enable Redis
+      systemd:
+        name: redis-server
+        state: started
+        enabled: true
+      tags: [stage1]
+
+    # --- Node.js ----------------------------------------------------------
+    - name: Install NodeSource repo
+      shell: |
+        curl -fsSL https://deb.nodesource.com/setup_{{ node_major_version }}.x | bash -
+      args:
+        creates: /etc/apt/sources.list.d/nodesource.list
+      tags: [stage1]
+
+    - name: Install Node.js
+      apt:
+        name: nodejs
+        state: present
+        update_cache: true
+      tags: [stage1]
+
+    # --- Composer ---------------------------------------------------------
+    - name: Install Composer
+      shell: |
+        curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+      args:
+        creates: /usr/local/bin/composer
+      tags: [stage1]
+
+    # --- UFW Firewall -----------------------------------------------------
+    - name: Allow SSH
       ufw:
         rule: allow
         port: "22"
+      tags: [stage1]
 
-    - name: Configure UFW - allow HTTP
+    - name: Allow HTTP
       ufw:
         rule: allow
         port: "80"
+      tags: [stage1]
 
-    - name: Configure UFW - allow HTTPS
+    - name: Allow HTTPS
       ufw:
         rule: allow
         port: "443"
+      tags: [stage1]
 
     - name: Enable UFW
       ufw:
         state: enabled
         default: deny
+      tags: [stage1]
 
-    - name: Create app directory
+    # --- App directory ----------------------------------------------------
+    - name: Create application directory
       file:
-        path: /opt/laravel
+        path: "{{ app_path }}"
         state: directory
-        mode: "0755"
+        owner: "{{ deploy_user }}"
+        group: www-data
+        mode: "0775"
+      tags: [stage1]
+
+    # --- Deploy key -------------------------------------------------------
+    - name: Create .ssh directory for deploy user
+      file:
+        path: "/home/{{ deploy_user }}/.ssh"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: "0700"
+      tags: [stage1]
+
+    - name: Generate ED25519 deploy key
+      become_user: "{{ deploy_user }}"
+      openssh_keypair:
+        path: "{{ deploy_key_path }}"
+        type: ed25519
+        comment: "{{ deploy_key_name }}@{{ droplet_name }}"
+      tags: [stage1]
+
+    - name: Read deploy public key
+      slurp:
+        src: "{{ deploy_key_path }}.pub"
+      register: deploy_key_pub
+      tags: [stage1]
+
+    - name: Configure SSH to use deploy key for GitHub
+      become_user: "{{ deploy_user }}"
+      copy:
+        dest: "/home/{{ deploy_user }}/.ssh/config"
+        content: |
+          Host github.com
+            IdentityFile {{ deploy_key_path }}
+            IdentitiesOnly yes
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: "0600"
+      tags: [stage1]
+
+    - name: ""
+      debug:
+        msg:
+          - ""
+          - "══════════════════════════════════════════════════════════"
+          - "  DEPLOY KEY"
+          - "══════════════════════════════════════════════════════════"
+          - ""
+          - "  {{ (deploy_key_pub.content | b64decode).strip() }}"
+          - ""
+          - "──────────────────────────────────────────────────────────"
+          - ""
+          - "  1. Copy the key above"
+          - "  2. Go to: https://github.com/Microsomes/laravel-docker-vue-starter-2026/settings/keys"
+          - "  3. Click 'Add deploy key' and paste it"
+          - ""
+          - "  Then run Stage 2:"
+          - "  $ ansible-playbook -i inventory.ini playbook.yml --tags stage2"
+          - ""
+          - "══════════════════════════════════════════════════════════"
+          - ""
+      tags: [stage1]
+
+    # =========================================================================
+    # STAGE 2: Clone repo, configure app, go live
+    # Run: ansible-playbook -i inventory.ini playbook.yml --tags stage2
+    # =========================================================================
+
+    # --- GitHub known_hosts -----------------------------------------------
+    - name: Add GitHub to known_hosts
+      become_user: "{{ deploy_user }}"
+      known_hosts:
+        name: github.com
+        key: "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+        path: "/home/{{ deploy_user }}/.ssh/known_hosts"
+        state: present
+      tags: [stage2]
+
+    # --- Clone repo -------------------------------------------------------
+    - name: Clone application repository
+      become_user: "{{ deploy_user }}"
+      git:
+        repo: "{{ app_repo }}"
+        dest: "{{ app_path }}"
+        version: "{{ app_branch }}"
+        accept_hostkey: true
+        force: true
+      tags: [stage2]
+
+    # --- Environment file -------------------------------------------------
+    - name: Deploy .env file
+      template:
+        src: templates/env.j2
+        dest: "{{ app_path }}/.env"
+        owner: "{{ deploy_user }}"
+        group: www-data
+        mode: "0640"
+      tags: [stage2]
+
+    # --- PHP dependencies -------------------------------------------------
+    - name: Composer install (no dev)
+      become_user: "{{ deploy_user }}"
+      shell: composer install --no-dev --optimize-autoloader --no-interaction
+      args:
+        chdir: "{{ app_path }}"
+      tags: [stage2]
+
+    # --- Laravel setup (must run before frontend build — Wayfinder needs it) ---
+    - name: Generate app key
+      become_user: "{{ deploy_user }}"
+      shell: php artisan key:generate --force
+      args:
+        chdir: "{{ app_path }}"
+      tags: [stage2]
+
+    - name: Run migrations
+      become_user: "{{ deploy_user }}"
+      shell: php artisan migrate --force
+      args:
+        chdir: "{{ app_path }}"
+      tags: [stage2]
+
+    - name: Create storage link
+      become_user: "{{ deploy_user }}"
+      shell: php artisan storage:link
+      args:
+        chdir: "{{ app_path }}"
+        creates: "{{ app_path }}/public/storage"
+      tags: [stage2]
+
+    # --- Frontend build (after Laravel is bootstrapped) -------------------
+    - name: npm ci
+      become_user: "{{ deploy_user }}"
+      shell: npm ci
+      args:
+        chdir: "{{ app_path }}"
+      tags: [stage2]
+
+    - name: npm run build
+      become_user: "{{ deploy_user }}"
+      shell: npm run build
+      args:
+        chdir: "{{ app_path }}"
+      tags: [stage2]
+
+    # --- Cache config -----------------------------------------------------
+    - name: Cache config, routes, views, events
+      become_user: "{{ deploy_user }}"
+      shell: |
+        php artisan config:cache
+        php artisan route:cache
+        php artisan view:cache
+        php artisan event:cache
+      args:
+        chdir: "{{ app_path }}"
+      tags: [stage2]
+
+    # --- File permissions -------------------------------------------------
+    - name: Set ownership
+      file:
+        path: "{{ app_path }}"
+        owner: "{{ deploy_user }}"
+        group: www-data
+        recurse: true
+      tags: [stage2]
+
+    - name: Set writable permissions for storage and cache
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0775"
+        recurse: true
+      loop:
+        - "{{ app_path }}/storage"
+        - "{{ app_path }}/bootstrap/cache"
+      tags: [stage2]
+
+    # --- Systemd: Horizon -------------------------------------------------
+    - name: Deploy Horizon systemd unit
+      template:
+        src: templates/laravel-horizon.service.j2
+        dest: /etc/systemd/system/laravel-horizon.service
+        mode: "0644"
+      tags: [stage2]
+
+    - name: Enable and start Horizon
+      systemd:
+        name: laravel-horizon
+        state: started
+        enabled: true
+        daemon_reload: true
+      tags: [stage2]
+
+    # --- Systemd: Reverb --------------------------------------------------
+    - name: Deploy Reverb systemd unit
+      template:
+        src: templates/laravel-reverb.service.j2
+        dest: /etc/systemd/system/laravel-reverb.service
+        mode: "0644"
+      tags: [stage2]
+
+    - name: Enable and start Reverb
+      systemd:
+        name: laravel-reverb
+        state: started
+        enabled: true
+        daemon_reload: true
+      tags: [stage2]
+
+    # --- Cron: Scheduler --------------------------------------------------
+    - name: Set up Laravel scheduler cron
+      cron:
+        name: "Laravel scheduler"
+        user: "{{ deploy_user }}"
+        minute: "*"
+        job: "cd {{ app_path }} && php artisan schedule:run >> /dev/null 2>&1"
+      tags: [stage2]
+
+    # --- SSL via Certbot --------------------------------------------------
+    - name: Install Certbot
+      apt:
+        name:
+          - certbot
+          - python3-certbot-nginx
+        state: present
+      when: ssl_enabled
+      tags: [stage2]
+
+    - name: Obtain SSL certificate
+      shell: |
+        certbot --nginx -d {{ app_domain }} --non-interactive --agree-tos -m {{ ssl_email }}
+      args:
+        creates: "/etc/letsencrypt/live/{{ app_domain }}/fullchain.pem"
+      when: ssl_enabled
+      tags: [stage2]
+
+    - name: Certbot auto-renewal cron
+      cron:
+        name: "Certbot renewal"
+        user: root
+        hour: "3"
+        minute: "30"
+        job: "certbot renew --quiet"
+      when: ssl_enabled
+      tags: [stage2]
+
+    # --- Reload services --------------------------------------------------
+    - name: Reload Nginx
+      systemd:
+        name: nginx
+        state: reloaded
+      tags: [stage2]
+
+    - name: Restart PHP-FPM
+      systemd:
+        name: "php{{ php_version }}-fpm"
+        state: restarted
+      tags: [stage2]
+
+  # =========================================================================
+  # Handlers
+  # =========================================================================
+  handlers:
+    - name: restart php-fpm
+      systemd:
+        name: "php{{ php_version }}-fpm"
+        state: restarted
+
+    - name: restart redis
+      systemd:
+        name: redis-server
+        state: restarted
+
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: reloaded
+
+    - name: restart horizon
+      systemd:
+        name: laravel-horizon
+        state: restarted
+
+    - name: restart reverb
+      systemd:
+        name: laravel-reverb
+        state: restarted

@@ -284,9 +284,10 @@ const features = [
 ];
 
 const infraSteps = [
-    { step: '01', label: 'Configure', desc: 'Set region, size, and image in config.yml' },
+    { step: '01', label: 'Configure', desc: 'Set domain, DB credentials, and droplet specs in config.yml' },
     { step: '02', label: 'Provision', desc: 'terraform apply creates your DigitalOcean droplet' },
-    { step: '03', label: 'Deploy', desc: 'Ansible playbooks configure the server and deploy your app' },
+    { step: '03', label: 'Stage 1', desc: 'Ansible installs PHP-FPM, Nginx, MariaDB, Redis and generates a deploy key' },
+    { step: '04', label: 'Stage 2', desc: 'Add deploy key to GitHub, then Ansible clones, builds, and goes live with SSL' },
 ];
 
 const techStack = [
@@ -642,17 +643,19 @@ const techStack = [
                                 <div class="mt-6 border-t border-zinc-800 pt-4">
                                     <p class="text-zinc-600"># config.yml</p>
                                     <p><span class="text-emerald-400">region</span>: <span class="text-amber-300">lon1</span></p>
-                                    <p><span class="text-emerald-400">size</span>: <span class="text-amber-300">s-1vcpu-1gb</span></p>
+                                    <p><span class="text-emerald-400">size</span>: <span class="text-amber-300">s-1vcpu-2gb</span></p>
                                     <p><span class="text-emerald-400">image</span>: <span class="text-amber-300">ubuntu-24-04-x64</span></p>
+                                    <p><span class="text-emerald-400">app_domain</span>: <span class="text-amber-300">staging.example.com</span></p>
                                 </div>
 
                                 <div class="mt-6 border-t border-zinc-800 pt-4">
-                                    <p class="text-zinc-600"># Deploy</p>
+                                    <p class="text-zinc-600"># Provision + Stage 1</p>
                                     <p><span class="text-emerald-400">$</span> cd .infra/staging/terraform</p>
-                                    <p><span class="text-emerald-400">$</span> terraform init</p>
-                                    <p><span class="text-emerald-400">$</span> terraform apply</p>
+                                    <p><span class="text-emerald-400">$</span> terraform init && terraform apply</p>
                                     <p><span class="text-emerald-400">$</span> cd ../ansible</p>
-                                    <p><span class="text-emerald-400">$</span> ansible-playbook playbook.yml</p>
+                                    <p><span class="text-emerald-400">$</span> ansible-playbook -i inventory.ini playbook.yml <span class="text-amber-300">--tags stage1</span></p>
+                                    <p class="text-zinc-600"># Copy deploy key to GitHub, then:</p>
+                                    <p><span class="text-emerald-400">$</span> ansible-playbook -i inventory.ini playbook.yml <span class="text-amber-300">--tags stage2</span></p>
                                 </div>
                             </div>
                         </div>

@@ -1,0 +1,16 @@
+[Unit]
+Description=Laravel Reverb WebSocket Server
+After=network.target redis-server.service
+
+[Service]
+User={{ deploy_user }}
+Group=www-data
+WorkingDirectory={{ app_path }}
+ExecStart=/usr/bin/php{{ php_version }} artisan reverb:start --host=127.0.0.1 --port={{ reverb_port }}
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/laravel-reverb.log
+StandardError=append:/var/log/laravel-reverb.log
+
+[Install]
+WantedBy=multi-user.target
