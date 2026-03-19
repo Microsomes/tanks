@@ -40,6 +40,42 @@
         state: present
       tags: [stage1]
 
+    # --- Swap (prevents OOM during npm builds) ------------------------------
+    - name: Create 2GB swap file
+      command: fallocate -l 2G /swapfile
+      args:
+        creates: /swapfile
+      tags: [stage1]
+
+    - name: Set swap file permissions
+      file:
+        path: /swapfile
+        mode: "0600"
+      tags: [stage1]
+
+    - name: Make swap
+      command: mkswap /swapfile
+      args:
+        creates: /proc/swaps
+      register: mkswap_result
+      changed_when: mkswap_result.rc == 0
+      failed_when: false
+      tags: [stage1]
+
+    - name: Enable swap
+      command: swapon /swapfile
+      register: swapon_result
+      changed_when: swapon_result.rc == 0
+      failed_when: false
+      tags: [stage1]
+
+    - name: Add swap to fstab
+      lineinfile:
+        path: /etc/fstab
+        line: "/swapfile none swap sw 0 0"
+        state: present
+      tags: [stage1]
+
     # --- Deploy user ------------------------------------------------------
     - name: Create deploy user
       user:
