@@ -40,8 +40,6 @@ services:
       MYSQL_DATABASE: laravel
       MYSQL_USER: laravel
       MYSQL_PASSWORD: secret
-    ports:
-      - "3306:3306"
     volumes:
       - mariadb_data:/var/lib/mysql
     networks:
@@ -74,8 +72,6 @@ services:
     image: redis:alpine
     container_name: laravel-redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     networks:
       - laravel
 
