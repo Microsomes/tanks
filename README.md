@@ -144,6 +144,12 @@ ssl_email: you@example.com
 ```bash
 cd .infra/staging/terraform
 terraform init
+
+# Option A: export as env var (recommended, avoids token in shell history)
+export TF_VAR_do_token=YOUR_DIGITALOCEAN_API_TOKEN
+terraform apply
+
+# Option B: pass inline
 terraform apply -var="do_token=YOUR_DIGITALOCEAN_API_TOKEN"
 ```
 
