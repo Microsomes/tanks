@@ -134,15 +134,24 @@ function handleClick(e: MouseEvent) {
 }
 
 const handleMouseMove = throttle((e: MouseEvent) => {
-    spawnTrail(e.clientX, e.clientY, myColor.value || '#8b5cf6');
+    const x = e.clientX;
+    const y = e.clientY;
+    const color = myColor.value || '#8b5cf6';
+
+    spawnTrail(x, y, color);
 
     if (!channel) return;
     channel.whisper('mouse-move', {
         id: myId.value,
-        x: e.clientX / window.innerWidth,
-        y: e.clientY / window.innerHeight,
-        color: myColor.value,
+        x: x / window.innerWidth,
+        y: y / window.innerHeight,
+        color,
         name: 'Visitor',
+    });
+    channel.whisper('trail', {
+        x: x / window.innerWidth,
+        y: y / window.innerHeight,
+        color,
     });
 }, 80);
 
@@ -209,6 +218,13 @@ onMounted(() => {
         })
         .listenForWhisper('particles', (e: any) => {
             spawnParticles(
+                e.x * window.innerWidth,
+                e.y * window.innerHeight,
+                e.color,
+            );
+        })
+        .listenForWhisper('trail', (e: any) => {
+            spawnTrail(
                 e.x * window.innerWidth,
                 e.y * window.innerHeight,
                 e.color,
