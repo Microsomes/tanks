@@ -193,15 +193,23 @@ function sendChat() {
 }
 
 function showChatBubble(message: string, color: string) {
-    const id = nextBubbleId++;
-    const x = 10 + Math.random() * 60;
-    const y = 15 + Math.random() * 50;
+    const ids: number[] = [];
+    for (let i = 0; i < 10; i++) {
+        const id = nextBubbleId++;
+        ids.push(id);
+        const x = 5 + Math.random() * 75;
+        const y = 10 + Math.random() * 65;
+        const delay = Math.random() * 600;
 
-    chatBubbles.value.push({ id, message, color, x, y });
+        setTimeout(() => {
+            chatBubbles.value.push({ id, message, color, x, y });
+        }, delay);
+    }
 
     setTimeout(() => {
-        chatBubbles.value = chatBubbles.value.filter((b) => b.id !== id);
-    }, 4000);
+        const idSet = new Set(ids);
+        chatBubbles.value = chatBubbles.value.filter((b) => !idSet.has(b.id));
+    }, 5000);
 }
 
 onMounted(() => {
