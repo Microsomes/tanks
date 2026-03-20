@@ -56,6 +56,7 @@ jobs:
           command_timeout: 10m
           script: |
             set -e
+            export GIT_SSH_COMMAND="ssh -i /home/deploy/.ssh/laravelstarter -o StrictHostKeyChecking=no -o IdentitiesOnly=yes"
             git config --global --add safe.directory /var/www/laravel
             cd /var/www/laravel
 
