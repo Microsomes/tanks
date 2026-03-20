@@ -53,10 +53,10 @@ jobs:
           host: ${{ secrets.STAGING_SERVER_IP }}
           username: ${{ secrets.STAGING_DEPLOY_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
-          script_stop: true
           command_timeout: 10m
           script: |
             set -e
+            git config --global --add safe.directory /var/www/laravel
             cd /var/www/laravel
 
             echo ">>> Maintenance mode"
