@@ -399,7 +399,7 @@ const techStack = [
                     <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-600">
                         <Zap class="h-5 w-5 text-white" />
                     </div>
-                    <span class="text-lg font-semibold text-zinc-100">Laravel Starter 2</span>
+                    <span class="text-lg font-semibold text-zinc-100">Laravel Starter</span>
                 </div>
                 <nav class="flex items-center gap-3">
                     <Link
