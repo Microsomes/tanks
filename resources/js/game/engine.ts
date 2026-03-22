@@ -49,6 +49,7 @@ interface RemoteTank {
     hp: number;
     alive: boolean;
     info: PlayerInfo;
+    spawnAnim: number; // 0 to 1, animated
 }
 
 export interface GameEngineCallbacks {
@@ -128,6 +129,10 @@ export class GameEngine {
     private rainDamageTick = 0;
     private rainCleanup: (() => void) | null = null;
     private rainZoneMesh: THREE.Mesh | null = null;
+
+    // Spawn animation
+    private spawnAnimating = false;
+    private spawnAnimTime = 0;
 
     // Camera shake
     private shakeIntensity = 0;
@@ -213,6 +218,11 @@ export class GameEngine {
         this.localHp = this.config.maxHp;
         this.localAlive = true;
         updateHpBar(this.localTank.hpBar, this.localHp);
+
+        // Spawn-in animation
+        this.localTank.group.scale.set(0.01, 0.01, 0.01);
+        this.spawnAnimating = true;
+        this.spawnAnimTime = 0;
     }
 
     setLocalPosition(x: number, z: number, rotation: number, hp?: number) {
@@ -237,6 +247,7 @@ export class GameEngine {
         const hp = pos?.hp ?? this.config.maxHp;
         mesh.group.position.set(spawn.x, 0, spawn.z);
         mesh.group.rotation.y = spawn.rotation;
+        mesh.group.scale.set(0.01, 0.01, 0.01);
         this.scene.add(mesh.group);
 
         this.remoteTanks.set(id, {
@@ -248,6 +259,7 @@ export class GameEngine {
             hp,
             alive: true,
             info,
+            spawnAnim: 0,
         });
         updateHpBar(mesh.hpBar, hp);
     }
@@ -442,6 +454,11 @@ export class GameEngine {
             updateHpBar(this.localTank.hpBar, this.localHp);
             this.callbacks.onHpChange(this.localHp);
             this.respawnGrace = 2;
+
+            // Spawn-in animation
+            this.localTank.group.scale.set(0.01, 0.01, 0.01);
+            this.spawnAnimating = true;
+            this.spawnAnimTime = 0;
         } else {
             const remote = this.remoteTanks.get(playerId);
             if (remote) {
@@ -454,6 +471,10 @@ export class GameEngine {
                 remote.mesh.group.rotation.y = spawn.rotation;
                 remote.mesh.group.visible = true;
                 updateHpBar(remote.mesh.hpBar, hp);
+
+                // Spawn-in animation
+                remote.mesh.group.scale.set(0.01, 0.01, 0.01);
+                remote.spawnAnim = 0;
             }
         }
     }
@@ -529,6 +550,19 @@ export class GameEngine {
         if (!this.spectateMode && this.localAlive) {
             this.updateLocalTank(dt);
             this.handleFiring();
+        }
+
+        // Spawn animation
+        if (this.spawnAnimating) {
+            this.spawnAnimTime += dt * 3; // 0.33 second animation
+            const t = Math.min(1, this.spawnAnimTime);
+            // Elastic ease-out
+            const scale = t < 1 ? 1 - Math.pow(2, -10 * t) * Math.cos((t * 10 - 0.75) * (2 * Math.PI) / 3) : 1;
+            this.localTank.group.scale.set(scale, scale, scale);
+            if (t >= 1) {
+                this.spawnAnimating = false;
+                this.localTank.group.scale.set(1, 1, 1);
+            }
         }
 
         this.updateRemoteTanks(dt);
@@ -790,6 +824,14 @@ export class GameEngine {
                 localTurretRot,
                 lerpFactor,
             );
+
+            // Spawn animation for remote tanks
+            if (remote.spawnAnim < 1) {
+                remote.spawnAnim = Math.min(1, remote.spawnAnim + dt * 3);
+                const t = remote.spawnAnim;
+                const scale = t < 1 ? 1 - Math.pow(2, -10 * t) * Math.cos((t * 10 - 0.75) * (2 * Math.PI) / 3) : 1;
+                remote.mesh.group.scale.set(scale, scale, scale);
+            }
         }
     }
 
@@ -1189,9 +1231,22 @@ export class GameEngine {
         this.localTank.nameSprite.lookAt(cameraPos);
 
         // Remote tanks
+        const camPos2D = new THREE.Vector2(cameraPos.x, cameraPos.z);
         for (const [, remote] of this.remoteTanks) {
             remote.mesh.hpBar.lookAt(cameraPos);
             remote.mesh.nameSprite.lookAt(cameraPos);
+
+            // Simple distance-based fade for remote tanks
+            const tankPos = new THREE.Vector2(remote.mesh.group.position.x, remote.mesh.group.position.z);
+            const dist = camPos2D.distanceTo(tankPos);
+            const bodyMat = remote.mesh.body.material as THREE.MeshLambertMaterial;
+            if (dist > 40) {
+                bodyMat.transparent = true;
+                bodyMat.opacity = Math.max(0.3, 1 - (dist - 40) / 30);
+            } else {
+                bodyMat.transparent = false;
+                bodyMat.opacity = 1;
+            }
         }
     }
 

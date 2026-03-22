@@ -56,6 +56,7 @@ const disconnectTimer = ref(0);
 let disconnectInterval: number | null = null;
 const rematchRequested = ref(false);
 const rematchRequestedBy = reactive<Set<string>>(new Set());
+const isTouchDevice = ref(false);
 let effectTickInterval: number | null = null;
 
 interface LobbyPlayer {
@@ -921,6 +922,7 @@ function handleBeforeUnload() {
 onMounted(async () => {
     window.addEventListener('beforeunload', handleBeforeUnload);
     uiAudio.load();
+    isTouchDevice.value = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
     // Check for saved session — attempt reconnection
     const savedRoom = sessionStorage.getItem('tanks_room_code');
@@ -1536,7 +1538,7 @@ function toggleReady() {
 
         <!-- Controls hint + Leave button -->
         <div class="absolute bottom-4 left-4 flex items-end gap-4">
-            <div class="text-gray-600 font-mono text-xs space-y-0.5 pointer-events-none">
+            <div v-if="!isTouchDevice" class="text-gray-600 font-mono text-xs space-y-0.5 pointer-events-none">
                 <p>W/A/S/D — Move</p>
                 <p>Mouse — Aim</p>
                 <p>Click — Fire</p>
@@ -1547,6 +1549,18 @@ function toggleReady() {
             >
                 LEAVE
             </button>
+        </div>
+
+        <!-- Touch controls (mobile only) -->
+        <div v-if="isTouchDevice" class="absolute bottom-8 left-8 pointer-events-none">
+            <div class="w-24 h-24 rounded-full border-2 border-white/20 flex items-center justify-center">
+                <div class="w-8 h-8 rounded-full bg-white/30"></div>
+            </div>
+        </div>
+        <div v-if="isTouchDevice" class="absolute bottom-8 right-8 pointer-events-none">
+            <div class="w-20 h-20 rounded-full border-2 border-red-400/30 flex items-center justify-center">
+                <span class="text-red-400/50 font-mono text-xs">TAP</span>
+            </div>
         </div>
     </div>
 

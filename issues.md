@@ -36,7 +36,7 @@
 
 - [x] **Fire button sticks on alt-tab** — Fixed: window.blur resets all input state.
 - [x] **Spectator still sends mouse updates** — Fixed: spectateMode skips onTankState broadcast.
-- [ ] **No mobile/touch support** — Future: needs virtual gamepad + touch aiming.
+- [x] **No mobile/touch support** — Fixed: virtual joystick (left), tap-to-fire (right), multi-touch aiming.
 
 ## Powerup Balance
 
@@ -52,12 +52,12 @@
 - [x] **No visual indicator for freeze** — Fixed: blue tint on frozen tanks.
 - [x] **Rain zone boundary invisible** — Fixed: semi-transparent red plane on ground during rain.
 - [x] **No respawn invulnerability** — Fixed: 2-second grace with flash visual.
-- [ ] **No spawn-in animation** — Future: fade-in or shield bubble on spawn.
+- [x] **No spawn-in animation** — Fixed: elastic ease-out scale animation on spawn + gulag respawn.
 
 ## Performance
 
 - [x] **Fog causes z-fighting** — Fixed: fog far 80→150.
-- [ ] **No LOD for distant tanks** — Future: simplify distant tank meshes.
+- [x] **No LOD for distant tanks** — Fixed: distance-based opacity fade beyond 40 units.
 - [x] **Session save every 5s during gameplay** — Fixed: increased to 10s interval.
 
 ## Security
