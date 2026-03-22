@@ -44,8 +44,10 @@ const gulagOpponent = ref('');
 const gulagInProgress = ref(false); // prevents win condition check
 const spectating = ref(false);
 const now = ref(performance.now());
-const disconnectTimer = ref(0);    // seconds remaining for reconnect grace period
+const disconnectTimer = ref(0);
 let disconnectInterval: number | null = null;
+const rematchRequested = ref(false);
+const rematchRequestedBy = reactive<Set<string>>(new Set());
 let effectTickInterval: number | null = null;
 
 interface LobbyPlayer {
@@ -474,6 +476,13 @@ async function joinChannel(code: string) {
                 if (killFeed.length > 5) killFeed.shift();
             }
         },
+        onRematchRequest(data) {
+            rematchRequestedBy.add(data.id);
+            // If admin requested rematch, just restart
+            if (data.id === players.find(p => p.isAdmin)?.id) {
+                resetGame();
+            }
+        },
     });
 
     try {
@@ -794,6 +803,8 @@ function resetGame() {
     gulagInProgress.value = false;
     spectating.value = false;
     reconnecting.value = false;
+    rematchRequested.value = false;
+    rematchRequestedBy.clear();
     currentSpawnAssignments = {};
     if (effectTickInterval) { clearInterval(effectTickInterval); effectTickInterval = null; }
     if (disconnectInterval) { clearInterval(disconnectInterval); disconnectInterval = null; }
@@ -808,6 +819,16 @@ function resetGame() {
 function adminRestart() {
     network?.sendRestart();
     resetGame();
+}
+
+function requestRematch() {
+    rematchRequested.value = true;
+    rematchRequestedBy.add(localId.value);
+    network?.sendRematchRequest({ id: localId.value, name: nickname.value });
+    // If we're admin, just restart directly
+    if (isAdmin.value) {
+        adminRestart();
+    }
 }
 
 function leaveGame() {
@@ -1223,6 +1244,12 @@ function toggleReady() {
                     >
                         COPY LINK
                     </button>
+                    <button
+                        @click="leaveGame"
+                        class="text-red-400 hover:text-red-300 transition-colors text-xs font-mono border border-red-400/30 px-2 py-1 rounded"
+                    >
+                        LEAVE ROOM
+                    </button>
                 </div>
             </div>
 
@@ -1475,15 +1502,32 @@ function toggleReady() {
                 <p class="text-lg text-gray-500 font-mono mb-8">wins the round</p>
             </template>
 
-            <div v-if="isAdmin" class="space-y-3">
+            <div class="flex items-center justify-center gap-4">
                 <button
-                    @click="adminRestart"
+                    v-if="!rematchRequested"
+                    @click="requestRematch"
                     class="px-8 py-3 bg-emerald-500 hover:bg-emerald-400 text-black font-bold rounded-lg transition-colors font-mono"
                 >
-                    PLAY AGAIN
+                    REMATCH
+                </button>
+                <span v-else class="px-8 py-3 bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 font-bold rounded-lg font-mono text-sm">
+                    REMATCH REQUESTED
+                </span>
+
+                <button
+                    @click="leaveGame"
+                    class="px-8 py-3 bg-gray-700 hover:bg-gray-600 text-white font-bold rounded-lg transition-colors font-mono"
+                >
+                    LEAVE
                 </button>
             </div>
-            <p v-else class="text-gray-500 font-mono text-sm">Waiting for host...</p>
+
+            <div v-if="rematchRequestedBy.size > 0" class="mt-4">
+                <p class="text-gray-500 font-mono text-xs">
+                    {{ Array.from(rematchRequestedBy).map(id => players.find(p => p.id === id)?.name || 'Someone').join(', ') }}
+                    {{ rematchRequestedBy.size === 1 ? 'wants' : 'want' }} a rematch
+                </p>
+            </div>
         </div>
     </div>
 </template>

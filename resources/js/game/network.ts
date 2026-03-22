@@ -26,6 +26,7 @@ export interface NetworkCallbacks {
     onGameState: (data: { spawnAssignments: Record<string, number>; mapName: string; phase: string }) => void;
     onPlayerDisconnect: (data: { id: string; name: string }) => void;
     onPlayerReconnect: (data: { id: string; name: string }) => void;
+    onRematchRequest: (data: { id: string; name: string }) => void;
 }
 
 /**
@@ -164,6 +165,9 @@ export class GameNetwork {
                 })
                 .listenForWhisper('player-reconnect', (data: { id: string; name: string }) => {
                     this.callbacks.onPlayerReconnect(data);
+                })
+                .listenForWhisper('rematch-request', (data: { id: string; name: string }) => {
+                    this.callbacks.onRematchRequest(data);
                 });
         });
     }
@@ -250,6 +254,10 @@ export class GameNetwork {
 
     sendPlayerReconnect(data: { id: string; name: string }) {
         this.channel?.whisper('player-reconnect', data);
+    }
+
+    sendRematchRequest(data: { id: string; name: string }) {
+        this.channel?.whisper('rematch-request', data);
     }
 
     leave() {
