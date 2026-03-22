@@ -27,6 +27,7 @@ export interface NetworkCallbacks {
     onPlayerDisconnect: (data: { id: string; name: string }) => void;
     onPlayerReconnect: (data: { id: string; name: string }) => void;
     onRematchRequest: (data: { id: string; name: string }) => void;
+    onFreeze: (data: { activatorId: string }) => void;
 }
 
 /**
@@ -168,6 +169,9 @@ export class GameNetwork {
                 })
                 .listenForWhisper('rematch-request', (data: { id: string; name: string }) => {
                     this.callbacks.onRematchRequest(data);
+                })
+                .listenForWhisper('freeze', (data: { activatorId: string }) => {
+                    this.callbacks.onFreeze(data);
                 });
         });
     }
@@ -258,6 +262,10 @@ export class GameNetwork {
 
     sendRematchRequest(data: { id: string; name: string }) {
         this.channel?.whisper('rematch-request', data);
+    }
+
+    sendFreeze(data: { activatorId: string }) {
+        this.channel?.whisper('freeze', data);
     }
 
     leave() {

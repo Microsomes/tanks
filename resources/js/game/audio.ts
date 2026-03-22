@@ -59,7 +59,7 @@ const FILE_SOUNDS = {
 } as const;
 
 type FileSoundName = keyof typeof FILE_SOUNDS;
-type SynthSoundName = 'ricochet' | 'pickup' | 'shield_break';
+type SynthSoundName = 'ricochet' | 'pickup' | 'shield_break' | 'gulag' | 'victory' | 'defeat';
 type SoundName = FileSoundName | SynthSoundName;
 
 export class AudioManager {
@@ -116,6 +116,18 @@ export class AudioManager {
         }
         if (name === 'shield_break') {
             this.playShieldBreak(volume ?? 0.3);
+            return;
+        }
+        if (name === 'gulag') {
+            this.playGulag(volume ?? 0.4);
+            return;
+        }
+        if (name === 'victory') {
+            this.playVictory(volume ?? 0.3);
+            return;
+        }
+        if (name === 'defeat') {
+            this.playDefeat(volume ?? 0.3);
             return;
         }
 
@@ -232,6 +244,67 @@ export class AudioManager {
         noiseGain.connect(ctx.destination);
         noise.start(now);
         noise.stop(now + 0.1);
+    }
+
+    private playGulag(volume: number) {
+        const ctx = this.getCtx();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        // Deep warning horn
+        for (let i = 0; i < 3; i++) {
+            const gain = ctx.createGain();
+            gain.connect(ctx.destination);
+            const t = now + i * 0.2;
+            gain.gain.setValueAtTime(volume, t);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+            const osc = ctx.createOscillator();
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(200 - i * 30, t);
+            osc.frequency.exponentialRampToValueAtTime(100 - i * 20, t + 0.25);
+            osc.connect(gain);
+            osc.start(t);
+            osc.stop(t + 0.3);
+        }
+    }
+
+    private playVictory(volume: number) {
+        const ctx = this.getCtx();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
+        for (let i = 0; i < notes.length; i++) {
+            const gain = ctx.createGain();
+            gain.connect(ctx.destination);
+            const t = now + i * 0.15;
+            gain.gain.setValueAtTime(volume, t);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+            const osc = ctx.createOscillator();
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(notes[i], t);
+            osc.connect(gain);
+            osc.start(t);
+            osc.stop(t + 0.4);
+        }
+    }
+
+    private playDefeat(volume: number) {
+        const ctx = this.getCtx();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        const notes = [392.00, 349.23, 293.66, 261.63]; // G4, F4, D4, C4
+        for (let i = 0; i < notes.length; i++) {
+            const gain = ctx.createGain();
+            gain.connect(ctx.destination);
+            const t = now + i * 0.25;
+            gain.gain.setValueAtTime(volume, t);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+            const osc = ctx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(notes[i], t);
+            osc.connect(gain);
+            osc.start(t);
+            osc.stop(t + 0.5);
+        }
     }
 
     startMusic(mapName: string) {

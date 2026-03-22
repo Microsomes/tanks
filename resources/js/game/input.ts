@@ -83,6 +83,15 @@ export function createInputHandler(canvas: HTMLCanvasElement, camera: THREE.Pers
     canvas.addEventListener('mouseup', onMouseUp);
     canvas.addEventListener('contextmenu', onContextMenu);
 
+    const onBlur = () => {
+        state.up = false;
+        state.down = false;
+        state.left = false;
+        state.right = false;
+        state.fire = false;
+    };
+    window.addEventListener('blur', onBlur);
+
     function destroy() {
         window.removeEventListener('keydown', onKeyDown);
         window.removeEventListener('keyup', onKeyUp);
@@ -90,6 +99,7 @@ export function createInputHandler(canvas: HTMLCanvasElement, camera: THREE.Pers
         canvas.removeEventListener('mousedown', onMouseDown);
         canvas.removeEventListener('mouseup', onMouseUp);
         canvas.removeEventListener('contextmenu', onContextMenu);
+        window.removeEventListener('blur', onBlur);
     }
 
     function consumeFire(): boolean {

@@ -236,6 +236,9 @@ export function removePowerup(powerup: PowerupObject, scene: THREE.Scene) {
                 child.material.dispose();
             }
         }
+        if (child instanceof THREE.PointLight) {
+            child.dispose();
+        }
     });
 }
 

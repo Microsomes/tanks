@@ -65,7 +65,7 @@ export function createTankMesh(color: string, name: string): TankMesh {
     return { group, body, turret, barrel, hpBar, nameSprite };
 }
 
-const BAR_WIDTH = 2.0;
+const BAR_WIDTH = 2.2;
 const BAR_HEIGHT = 0.15;
 
 function createHpBar(): THREE.Group {
@@ -129,6 +129,10 @@ function createNameSprite(name: string, color: string): THREE.Sprite {
     ctx.font = 'bold 28px monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    // Dark outline for readability
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 4;
+    ctx.strokeText(name.substring(0, 12), 128, 32);
     ctx.fillStyle = color;
     ctx.fillText(name.substring(0, 12), 128, 32);
 

@@ -5,6 +5,7 @@ import Echo from 'laravel-echo';
 import Pusher from 'pusher-js';
 import { GameEngine } from '@/game/engine';
 import { GameNetwork } from '@/game/network';
+import { AudioManager } from '@/game/audio';
 import { DEFAULT_CONFIG, TANK_COLORS, GULAG_CONFIG } from '@/game/types';
 import type { PlayerInfo, GamePhase, TankState, FireEvent, HitEvent, ActiveEffect, PowerupType, RainBulletsEvent, GulagEvent, GulagResultEvent } from '@/game/types';
 import type { MapName } from '@/game/arena';
@@ -69,6 +70,7 @@ let network: GameNetwork | null = null;
 let engine: GameEngine | null = null;
 let echo: Echo<'reverb'> | null = null;
 let currentSpawnAssignments: Record<string, number> = {};
+const uiAudio = new AudioManager();
 
 const MAX_PLAYERS = 8;
 
@@ -213,6 +215,7 @@ async function spectateRoom(code: string, mapName: string) {
         onEffectsChange() {},
         onRainBullets() {},
         onGulag() {},
+        onFreeze() {},
     }, undefined, mapName as MapName);
 
     engine.init();
@@ -419,6 +422,8 @@ async function joinChannel(code: string) {
             phase.value = 'gameover';
             winner.value = data.winnerName;
             winnerId.value = data.winnerId;
+            if (effectTickInterval) { clearInterval(effectTickInterval); effectTickInterval = null; }
+            uiAudio.play(data.winnerId === localId.value ? 'victory' : 'defeat');
             clearSessionStorage();
         },
         onRestart() {
@@ -478,10 +483,12 @@ async function joinChannel(code: string) {
         },
         onRematchRequest(data) {
             rematchRequestedBy.add(data.id);
-            // If admin requested rematch, just restart
             if (data.id === players.find(p => p.isAdmin)?.id) {
                 resetGame();
             }
+        },
+        onFreeze(data) {
+            engine?.applyRemoteFreeze(data.activatorId);
         },
     });
 
@@ -514,6 +521,8 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
     alive.value = true;
     winner.value = '';
     killFeed.splice(0, killFeed.length);
+    Object.keys(gameKills).forEach(k => delete gameKills[k]);
+    Object.keys(gameDeaths).forEach(k => delete gameDeaths[k]);
 
     // Countdown (skip if 0, e.g. reconnecting)
     if (countdownSec > 0) {
@@ -591,6 +600,8 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
             phase.value = 'gameover';
             winner.value = data.winnerName;
             winnerId.value = data.winnerId;
+            if (effectTickInterval) { clearInterval(effectTickInterval); effectTickInterval = null; }
+            uiAudio.play(data.winnerId === localId.value ? 'victory' : 'defeat');
             network?.sendGameOver(data);
             clearSessionStorage();
             if (isAdmin.value) {
@@ -604,6 +615,11 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
             killFeed.push({ killer: killerName, target: targetName, time: Date.now() });
             // Keep only last 5
             if (killFeed.length > 5) killFeed.shift();
+            // Track kills/deaths by name
+            const killer = players.find(p => p.name === killerName);
+            const target = players.find(p => p.name === targetName);
+            if (killer) gameKills[killer.id] = (gameKills[killer.id] || 0) + 1;
+            if (target) gameDeaths[target.id] = (gameDeaths[target.id] || 0) + 1;
         },
         onPowerupSpawn(event) {
             network?.sendPowerupSpawn(event);
@@ -619,6 +635,9 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
         },
         onGulag(event: GulagEvent) {
             network?.sendGulag(event);
+        },
+        onFreeze(data) {
+            network?.sendFreeze(data);
         },
     }, undefined, mapName);
 
@@ -729,6 +748,7 @@ async function handleGulagEvent(event: GulagEvent) {
     const killerName = killerPlayer?.name || 'Unknown';
 
     gulagInProgress.value = true;
+    engine?.setGulagInProgress(true);
 
     // Show in kill feed
     killFeed.push({ killer: 'GULAG', target: `${deadName} vs ${killerName}!`, time: Date.now() });
@@ -738,6 +758,7 @@ async function handleGulagEvent(event: GulagEvent) {
 
     if (isLocal) {
         gulagActive.value = true;
+        uiAudio.play('gulag');
         gulagOpponent.value = event.deadPlayerId === localId.value ? killerName : deadName;
         gulagCountdown.value = GULAG_CONFIG.countdownSec;
 
@@ -763,6 +784,7 @@ async function handleGulagEvent(event: GulagEvent) {
 
 function handleGulagResult(event: GulagResultEvent) {
     gulagInProgress.value = false;
+    engine?.setGulagInProgress(false);
     gulagActive.value = false;
     gulagOpponent.value = '';
 
@@ -802,6 +824,8 @@ function resetGame() {
     gulagOpponent.value = '';
     gulagInProgress.value = false;
     spectating.value = false;
+    Object.keys(gameKills).forEach(k => delete gameKills[k]);
+    Object.keys(gameDeaths).forEach(k => delete gameDeaths[k]);
     reconnecting.value = false;
     rematchRequested.value = false;
     rematchRequestedBy.clear();
@@ -881,6 +905,7 @@ function handleBeforeUnload() {
 
 onMounted(async () => {
     window.addEventListener('beforeunload', handleBeforeUnload);
+    uiAudio.load();
 
     // Check for saved session — attempt reconnection
     const savedRoom = sessionStorage.getItem('tanks_room_code');
@@ -892,6 +917,15 @@ onMounted(async () => {
             roomCode.value = savedRoom;
             reconnecting.value = true;
             await joinChannel(savedRoom);
+            // Wait a tick for onPlayersUpdate to set localId
+            await new Promise(r => setTimeout(r, 100));
+            if (!localId.value) {
+                // Still no ID — fail gracefully
+                clearSessionStorage();
+                reconnecting.value = false;
+                roomCode.value = '';
+                return;
+            }
             history.replaceState(null, '', '?code=' + roomCode.value);
             // Request game state from other players
             network?.sendRequestState({ requesterId: localId.value });
@@ -959,6 +993,7 @@ onUnmounted(() => {
     }
     engine?.destroy();
     network?.leave();
+    uiAudio.destroy();
     if (effectTickInterval) { clearInterval(effectTickInterval); effectTickInterval = null; }
 });
 
@@ -1000,8 +1035,8 @@ function reportGameEnd(winnerName: string, winnerPlayerId: string) {
     const playerStats = players.map(p => ({
         identifier: p.id,
         nickname: p.name,
-        kills: 0,
-        deaths: 0,
+        kills: gameKills[p.id] || 0,
+        deaths: gameDeaths[p.id] || 0,
         won: p.id === winnerPlayerId,
     }));
 
@@ -1434,11 +1469,11 @@ function toggleReady() {
                 class="text-xs font-mono px-3 py-1 bg-black/50 rounded text-white"
             >
                 <template v-if="kill.killer === 'SYSTEM'">
-                    <span class="text-yellow-400">{{ kill.target }}</span>
+                    <span class="text-gray-400">{{ kill.target }}</span>
                 </template>
                 <template v-else-if="kill.killer === 'GULAG'">
-                    <span class="text-yellow-400">{{ kill.killer }}</span>
-                    <span class="text-gray-500"> — </span>
+                    <span class="text-yellow-400">GULAG</span>
+                    <span class="text-gray-400"> — </span>
                     <span class="text-gray-300">{{ kill.target }}</span>
                 </template>
                 <template v-else>

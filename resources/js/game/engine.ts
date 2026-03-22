@@ -63,6 +63,7 @@ export interface GameEngineCallbacks {
     onPowerupPickup: (event: PowerupPickupEvent) => void;
     onEffectsChange: (effects: ActiveEffect[]) => void;
     onRainBullets: (event: RainBulletsEvent) => void;
+    onFreeze: (data: { activatorId: string }) => void;
     onGulag: (event: GulagEvent) => void;
 }
 
@@ -127,6 +128,12 @@ export class GameEngine {
     private rainDamageTick = 0;
     private rainCleanup: (() => void) | null = null;
 
+    // Gulag state
+    private gulagInProgress = false;
+
+    // Respawn invulnerability
+    private respawnGrace = 0;
+
     constructor(
         private canvas: HTMLCanvasElement,
         localId: string,
@@ -159,7 +166,7 @@ export class GameEngine {
 
         // Scene
         this.scene = new THREE.Scene();
-        this.scene.fog = new THREE.Fog(0x1a1a2e, 40, 80);
+        this.scene.fog = new THREE.Fog(0x1a1a2e, 60, 150);
 
         // Camera
         this.camera = createCamera(this.config);
@@ -239,6 +246,17 @@ export class GameEngine {
         const remote = this.remoteTanks.get(id);
         if (remote) {
             this.scene.remove(remote.mesh.group);
+            remote.mesh.group.traverse((child) => {
+                if (child instanceof THREE.Mesh) {
+                    child.geometry.dispose();
+                    if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+                    else child.material.dispose();
+                }
+                if (child instanceof THREE.Sprite) {
+                    child.material.map?.dispose();
+                    child.material.dispose();
+                }
+            });
             this.remoteTanks.delete(id);
         }
     }
@@ -361,6 +379,18 @@ export class GameEngine {
         this.rainCleanup = createRainBulletEffect(this.scene, this.config);
     }
 
+    setGulagInProgress(v: boolean) {
+        this.gulagInProgress = v;
+    }
+
+    applyRemoteFreeze(activatorId: string) {
+        if (activatorId === this.localId) return; // Don't freeze yourself
+        this.frozenByEnemy = true;
+        setTimeout(() => {
+            this.frozenByEnemy = false;
+        }, 5000);
+    }
+
     // ─── Gulag Respawn ────────────────────────────────────────────
 
     respawnFromGulag(playerId: string, spawnIndex: number) {
@@ -379,6 +409,7 @@ export class GameEngine {
             this.localTank.group.visible = true;
             updateHpBar(this.localTank.hpBar, this.localHp);
             this.callbacks.onHpChange(this.localHp);
+            this.respawnGrace = 2;
         } else {
             const remote = this.remoteTanks.get(playerId);
             if (remote) {
@@ -455,6 +486,8 @@ export class GameEngine {
 
         const dt = Math.min(this.clock.getDelta(), 0.05); // Cap delta time
 
+        if (this.respawnGrace > 0) this.respawnGrace -= dt;
+
         if (!this.spectateMode && this.localAlive) {
             this.updateLocalTank(dt);
             this.handleFiring();
@@ -488,7 +521,7 @@ export class GameEngine {
                     Math.abs(x) < safeX && Math.abs(z) < safeZ;
 
                 // Check local tank
-                if (this.localAlive && this.localId !== this.rainActivatorId && inRainZone(this.localX, this.localZ)) {
+                if (this.localAlive && this.localId !== this.rainActivatorId && !this.spectateMode && !this.gulagInProgress && inRainZone(this.localX, this.localZ)) {
                     if (Math.random() < 0.2) {
                         // Shield absorbs the hit
                         if (this.hasEffect('shield')) {
@@ -582,7 +615,8 @@ export class GameEngine {
 
             // Rotate body to face movement direction (same convention as turret)
             const targetRot = Math.atan2(-dx, dz);
-            this.localBodyRot = lerpAngle(this.localBodyRot, targetRot, 0.2);
+            const rotLerp = this.hasEffect('speed_boost') ? 0.32 : 0.2;
+            this.localBodyRot = lerpAngle(this.localBodyRot, targetRot, rotLerp);
         }
 
         // Try move with wall collision (each axis independently)
@@ -724,6 +758,7 @@ export class GameEngine {
 
     private checkLocalHits() {
         if (!this.localAlive) return;
+        if (this.respawnGrace > 0) return;
 
         const now = this.clock.getElapsedTime();
 
@@ -731,10 +766,11 @@ export class GameEngine {
             const proj = this.projectiles[i];
             if (!proj.alive) continue;
 
-            // Grace period for self-shots
+            // Grace period for self-shots (longer for big_shot projectiles)
             if (proj.shooterId === this.localId) {
                 const spawnTime = this.projectileSpawnTimes.get(proj.id);
-                if (spawnTime && now - spawnTime < this.selfHitGracePeriod) continue;
+                const grace = proj.damage > 1 ? 0.8 : this.selfHitGracePeriod;
+                if (spawnTime && now - spawnTime < grace) continue;
             }
 
             // Check hits on remote tanks — remove projectile on contact (they handle their own HP)
@@ -895,9 +931,8 @@ export class GameEngine {
         }
 
         if (type === 'freeze') {
-            // Freeze is a timed effect — enemies see it via network
-            // We just apply it as a normal timed effect; the freeze flag
-            // for remote players is handled via the TankState broadcast
+            // Freeze is a timed effect — broadcast to all enemies
+            this.callbacks.onFreeze({ activatorId: this.localId });
         }
 
         const duration = POWERUP_CONFIG.durations[type];
@@ -962,12 +997,33 @@ export class GameEngine {
             }
         }
 
-        // Freeze — check if any remote player has freeze active (via their tank state)
-        // Simple: if I have freeze, remote tanks are slowed (visual only — their own client slows them)
-        // If any remote has freeze, I'm slowed (frozenByEnemy flag)
-        // We encode freeze in TankState via a convention: handled by broadcasting freeze event
-        // For simplicity: freeze slows ALL enemies. We track it via activeEffects on the freezer's side.
-        // The frozen state for the local player is set when receiving a freeze event.
+        // Freeze — visual feedback
+        // If local player has freeze active, tint remote tanks blue
+        const localHasFreeze = this.hasEffect('freeze');
+        for (const [, remote] of this.remoteTanks) {
+            const rBodyMat = remote.mesh.body.material as THREE.MeshLambertMaterial;
+            if (localHasFreeze && remote.alive) {
+                rBodyMat.color.set(0x4488ff);
+            } else {
+                rBodyMat.color.set(remote.info.color);
+            }
+        }
+        // If frozenByEnemy, tint local tank blue
+        if (this.frozenByEnemy) {
+            bodyMat.color.set(0x4488ff);
+        } else if (!ghostActive) {
+            bodyMat.color.set(this.localInfo.color);
+        }
+
+        // Respawn invulnerability — flash/pulse the tank
+        if (this.respawnGrace > 0) {
+            const pulse = Math.sin(performance.now() * 0.01) * 0.5 + 0.5;
+            bodyMat.opacity = 0.3 + pulse * 0.7;
+            bodyMat.transparent = true;
+        } else if (!ghostActive) {
+            bodyMat.opacity = 1;
+            bodyMat.transparent = false;
+        }
 
         // Landmine collision check
         for (let i = this.landmines.length - 1; i >= 0; i--) {

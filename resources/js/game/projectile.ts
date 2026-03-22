@@ -36,7 +36,11 @@ export function createProjectile(
 
     // Trail
     const trailPoints = [new THREE.Vector3(x, 0.5, z)];
-    const trailGeo = new THREE.BufferGeometry().setFromPoints(trailPoints);
+    const trailGeo = new THREE.BufferGeometry();
+    const trailPositions = new Float32Array(MAX_TRAIL_LENGTH * 3);
+    trailPositions[0] = x; trailPositions[1] = 0.5; trailPositions[2] = z;
+    trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+    trailGeo.setDrawRange(0, 1);
     const trailMat = new THREE.LineBasicMaterial({
         color: tankColor,
         transparent: true,
@@ -147,8 +151,14 @@ export function updateProjectile(
     if (projectile.trailPoints.length > MAX_TRAIL_LENGTH) {
         projectile.trailPoints.shift();
     }
-    projectile.trail.geometry.dispose();
-    projectile.trail.geometry = new THREE.BufferGeometry().setFromPoints(projectile.trailPoints);
+    const positions = new Float32Array(projectile.trailPoints.length * 3);
+    for (let j = 0; j < projectile.trailPoints.length; j++) {
+        positions[j * 3] = projectile.trailPoints[j].x;
+        positions[j * 3 + 1] = projectile.trailPoints[j].y;
+        positions[j * 3 + 2] = projectile.trailPoints[j].z;
+    }
+    projectile.trail.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    projectile.trail.geometry.setDrawRange(0, projectile.trailPoints.length);
 
     return bounced ? 'bounced' : 'alive';
 }
