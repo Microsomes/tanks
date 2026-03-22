@@ -3,7 +3,6 @@ services:
     build:
       context: .docker/dev/php
       dockerfile: Dockerfile
-    container_name: laravel-app
     restart: unless-stopped
     working_dir: /var/www/html
     volumes:
@@ -20,7 +19,6 @@ services:
     build:
       context: .docker/dev/nginx
       dockerfile: Dockerfile
-    container_name: laravel-nginx
     restart: unless-stopped
     ports:
       - "9005:80"
@@ -33,7 +31,6 @@ services:
 
   mariadb:
     image: mariadb:11
-    container_name: laravel-mariadb
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: secret
@@ -54,7 +51,6 @@ services:
     build:
       context: .docker/dev/php
       dockerfile: Dockerfile
-    container_name: laravel-node
     restart: unless-stopped
     working_dir: /var/www/html
     ports:
@@ -70,7 +66,6 @@ services:
 
   redis:
     image: redis:alpine
-    container_name: laravel-redis
     restart: unless-stopped
     networks:
       - laravel
@@ -79,7 +74,6 @@ services:
     build:
       context: .docker/dev/php
       dockerfile: Dockerfile
-    container_name: laravel-reverb
     restart: unless-stopped
     working_dir: /var/www/html
     ports:
@@ -99,7 +93,6 @@ services:
     build:
       context: .docker/dev/php
       dockerfile: Dockerfile
-    container_name: laravel-horizon
     restart: unless-stopped
     working_dir: /var/www/html
     volumes:
@@ -117,7 +110,6 @@ services:
     build:
       context: .docker/dev/php
       dockerfile: Dockerfile
-    container_name: laravel-scheduler
     restart: unless-stopped
     working_dir: /var/www/html
     volumes:
@@ -133,7 +125,6 @@ services:
 
   mailpit:
     image: axllent/mailpit
-    container_name: laravel-mailpit
     restart: unless-stopped
     ports:
       - "8025:8025"
