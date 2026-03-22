@@ -38,6 +38,13 @@ const gameKills = reactive<Record<string, number>>({});
 const gameDeaths = reactive<Record<string, number>>({});
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const selectedMap = ref<MapName>('classic');
+const mapDescriptions: Record<string, string> = {
+    classic: 'Balanced cross layout',
+    corridors: 'Tight lanes & chokepoints',
+    bunkers: 'Corner forts, open center',
+    open: 'Minimal cover, high risk',
+    maze: 'Dense winding paths',
+};
 const gulagActive = ref(false);
 const gulagCountdown = ref(0);
 const gulagUsed = new Set<string>();
@@ -62,6 +69,7 @@ interface LobbyPlayer {
 const players = reactive<LobbyPlayer[]>([]);
 const localReady = ref(false);
 const errorMsg = ref('');
+const freshTopPlayers = reactive<any[]>([]);
 
 const reconnecting = ref(false);
 let lastSessionSave = 0;
@@ -295,29 +303,32 @@ async function joinChannel(code: string) {
                 killFeed.push({ killer: 'SYSTEM', target: `${member.name} reconnected`, time: Date.now() });
                 if (killFeed.length > 5) killFeed.shift();
                 network?.sendPlayerReconnect({ id: member.id, name: member.name });
-                // Re-add their tank — fetch last position from DB
-                const spawnIdx = currentSpawnAssignments[member.id] ?? 0;
-                const tankInfo: PlayerInfo = {
-                    id: member.id,
-                    name: member.name,
-                    color: member.color || TANK_COLORS[0],
-                    isAdmin: false,
-                };
-                fetch(`/api/game/session?room_code=${roomCode.value}&player_identifier=${member.id}`)
-                    .then(r => r.json())
-                    .then(data => {
-                        if (data.session && engine) {
-                            const s = data.session;
-                            engine.addRemoteTank(member.id, tankInfo, spawnIdx, {
-                                x: s.x, z: s.z, rotation: s.body_rotation, hp: s.hp,
-                            });
-                        } else if (engine) {
-                            engine.addRemoteTank(member.id, tankInfo, spawnIdx);
-                        }
-                    })
-                    .catch(() => {
-                        engine?.addRemoteTank(member.id, tankInfo, spawnIdx);
-                    });
+                // Skip adding tank during gulag — tank state whispers will sync after gulag ends
+                if (!gulagInProgress.value) {
+                    // Re-add their tank — fetch last position from DB
+                    const spawnIdx = currentSpawnAssignments[member.id] ?? 0;
+                    const tankInfo: PlayerInfo = {
+                        id: member.id,
+                        name: member.name,
+                        color: member.color || TANK_COLORS[0],
+                        isAdmin: false,
+                    };
+                    fetch(`/api/game/session?room_code=${roomCode.value}&player_identifier=${member.id}`)
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.session && engine) {
+                                const s = data.session;
+                                engine.addRemoteTank(member.id, tankInfo, spawnIdx, {
+                                    x: s.x, z: s.z, rotation: s.body_rotation, hp: s.hp,
+                                });
+                            } else if (engine) {
+                                engine.addRemoteTank(member.id, tankInfo, spawnIdx);
+                            }
+                        })
+                        .catch(() => {
+                            engine?.addRemoteTank(member.id, tankInfo, spawnIdx);
+                        });
+                }
             }
             if (isAdmin.value) {
                 syncRoom();
@@ -365,6 +376,7 @@ async function joinChannel(code: string) {
                                 if (isAdmin.value) {
                                     network?.sendGameOver({ winnerId: localId.value, winnerName: nickname.value });
                                     reportGameEnd(nickname.value, localId.value);
+                                    refreshLeaderboard();
                                 }
                                 clearSessionStorage();
                             }
@@ -557,9 +569,9 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
         },
         onTankState(state) {
             network?.sendTankState(state);
-            // Save position to DB every 5 seconds
+            // Save position to DB every 10 seconds
             const t = Date.now();
-            if (t - lastSessionSave > 5000) {
+            if (t - lastSessionSave > 10000) {
                 lastSessionSave = t;
                 apiPost('/api/game/session/save', {
                     room_code: roomCode.value,
@@ -606,6 +618,7 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
             clearSessionStorage();
             if (isAdmin.value) {
                 reportGameEnd(data.winnerName, data.winnerId);
+                refreshLeaderboard();
             }
         },
         onHpChange(hp) {
@@ -700,6 +713,7 @@ function clearSessionStorage() {
 
 function checkWinCondition() {
     if (!engine || phase.value !== 'playing') return;
+    if (gulagInProgress.value) return;
 
     const totalPlayers = engine.getTotalPlayerCount();
     if (totalPlayers < 1) return; // Allow solo play
@@ -729,6 +743,7 @@ function checkWinCondition() {
         if (isAdmin.value) {
             network?.sendGameOver({ winnerId: wId, winnerName: wName });
             reportGameEnd(wName, wId);
+            refreshLeaderboard();
         }
     }
 }
@@ -1050,6 +1065,16 @@ function reportGameEnd(winnerName: string, winnerPlayerId: string) {
     });
 }
 
+async function refreshLeaderboard() {
+    try {
+        const res = await fetch('/api/leaderboard/top');
+        const data = await res.json();
+        if (Array.isArray(data)) {
+            freshTopPlayers.splice(0, freshTopPlayers.length, ...data);
+        }
+    } catch {}
+}
+
 function effectLabel(type: PowerupType): string {
     const labels: Record<PowerupType, string> = {
         triple_shot: 'TRIPLE',
@@ -1238,8 +1263,8 @@ function toggleReady() {
             <!-- Top Players -->
             <div class="mt-8">
                 <h3 class="text-lg font-bold text-white font-mono mb-3">Top Players</h3>
-                <div v-if="props.topPlayers?.length" class="space-y-1">
-                    <div v-for="(player, i) in props.topPlayers" :key="player.id"
+                <div v-if="(freshTopPlayers.length ? freshTopPlayers : props.topPlayers)?.length" class="space-y-1">
+                    <div v-for="(player, i) in (freshTopPlayers.length ? freshTopPlayers : props.topPlayers)" :key="player.id"
                          class="flex items-center justify-between px-4 py-2 rounded-lg"
                          :class="i === 0 ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-[#2a2a4a]'">
                         <div class="flex items-center gap-2">
@@ -1358,6 +1383,7 @@ function toggleReady() {
                         ]"
                     >
                         {{ map }}
+                        <span class="block text-[9px] opacity-60 normal-case tracking-normal mt-0.5">{{ mapDescriptions[map] }}</span>
                     </button>
                 </div>
             </div>

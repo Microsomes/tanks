@@ -166,6 +166,6 @@ export interface GulagResultEvent {
 
 export const GULAG_CONFIG = {
     chance: 0.3,
-    hp: 2,              // 25% of max (roughly)
+    hp: 3,              // ~60% of max — survivable after gulag
     countdownSec: 3,
 } as const;

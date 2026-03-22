@@ -193,7 +193,7 @@ export class GameNetwork {
                 this.channel.whisper('tank-state', this.lastState);
             }
             this.throttleTimer = null;
-        }, 66); // ~15Hz
+        }, 50); // ~20Hz
     }
 
     sendFire(event: FireEvent) {

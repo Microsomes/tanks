@@ -127,6 +127,11 @@ export class GameEngine {
     private rainTimer = 0;
     private rainDamageTick = 0;
     private rainCleanup: (() => void) | null = null;
+    private rainZoneMesh: THREE.Mesh | null = null;
+
+    // Camera shake
+    private shakeIntensity = 0;
+    private shakeDecay = 5;
 
     // Gulag state
     private gulagInProgress = false;
@@ -153,43 +158,48 @@ export class GameEngine {
     }
 
     init() {
-        // Renderer
-        this.renderer = new THREE.WebGLRenderer({
-            canvas: this.canvas,
-            antialias: true,
-        });
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        this.renderer.shadowMap.enabled = true;
-        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        this.renderer.setClearColor(0x1a1a2e);
+        try {
+            // Renderer
+            this.renderer = new THREE.WebGLRenderer({
+                canvas: this.canvas,
+                antialias: true,
+            });
+            this.renderer.setSize(window.innerWidth, window.innerHeight);
+            this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            this.renderer.shadowMap.enabled = true;
+            this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            this.renderer.setClearColor(0x1a1a2e);
 
-        // Scene
-        this.scene = new THREE.Scene();
-        this.scene.fog = new THREE.Fog(0x1a1a2e, 60, 150);
+            // Scene
+            this.scene = new THREE.Scene();
+            this.scene.fog = new THREE.Fog(0x1a1a2e, 60, 150);
 
-        // Camera
-        this.camera = createCamera(this.config);
+            // Camera
+            this.camera = createCamera(this.config);
 
-        // Lighting
-        createLighting(this.scene);
+            // Lighting
+            createLighting(this.scene);
 
-        // Arena
-        this.walls = createArena(this.scene, this.config, this.mapName);
+            // Arena
+            this.walls = createArena(this.scene, this.config, this.mapName);
 
-        // Local tank
-        this.localTank = createTankMesh(this.localInfo.color, this.localInfo.name);
-        this.scene.add(this.localTank.group);
+            // Local tank
+            this.localTank = createTankMesh(this.localInfo.color, this.localInfo.name);
+            this.scene.add(this.localTank.group);
 
-        // Input
-        this.input = createInputHandler(this.canvas, this.camera);
+            // Input
+            this.input = createInputHandler(this.canvas, this.camera);
 
-        // Audio
-        this.audio.load();
-        this.audio.startMusic(this.mapName);
+            // Audio
+            this.audio.load();
+            this.audio.startMusic(this.mapName);
 
-        // Resize
-        window.addEventListener('resize', this.onResize);
+            // Resize
+            window.addEventListener('resize', this.onResize);
+        } catch (err) {
+            window.removeEventListener('resize', this.onResize);
+            throw err;
+        }
     }
 
     spawnLocal(spawnIndex: number) {
@@ -323,6 +333,7 @@ export class GameEngine {
                 remote.info.color,
             );
             this.audio.play('explosion', 0.6);
+            this.shakeCamera(0.3);
 
             // Find killer name
             let killerName = 'Unknown';
@@ -370,6 +381,10 @@ export class GameEngine {
         return [...this.activeEffects];
     }
 
+    private shakeCamera(intensity: number) {
+        this.shakeIntensity = Math.max(this.shakeIntensity, intensity);
+    }
+
     startRainBullets(activatorId: string) {
         this.rainBulletsActive = true;
         this.rainActivatorId = activatorId;
@@ -377,6 +392,23 @@ export class GameEngine {
         this.rainDamageTick = 0;
         this.rainCleanup?.();
         this.rainCleanup = createRainBulletEffect(this.scene, this.config);
+
+        // Show rain zone boundary
+        const zoneW = this.config.arenaWidth * 0.6;
+        const zoneH = this.config.arenaHeight * 0.6;
+        const zoneGeo = new THREE.PlaneGeometry(zoneW, zoneH);
+        const zoneMat = new THREE.MeshBasicMaterial({
+            color: 0xff2200,
+            transparent: true,
+            opacity: 0.08,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+        });
+        const zoneMesh = new THREE.Mesh(zoneGeo, zoneMat);
+        zoneMesh.rotation.x = -Math.PI / 2;
+        zoneMesh.position.y = 0.02;
+        this.scene.add(zoneMesh);
+        this.rainZoneMesh = zoneMesh;
     }
 
     setGulagInProgress(v: boolean) {
@@ -461,6 +493,12 @@ export class GameEngine {
             this.rainCleanup();
             this.rainCleanup = null;
             this.rainBulletsActive = false;
+        }
+        if (this.rainZoneMesh) {
+            this.scene.remove(this.rainZoneMesh);
+            this.rainZoneMesh.geometry.dispose();
+            (this.rainZoneMesh.material as THREE.Material).dispose();
+            this.rainZoneMesh = null;
         }
         window.removeEventListener('resize', this.onResize);
         this.renderer?.dispose();
@@ -569,6 +607,12 @@ export class GameEngine {
                 this.rainBulletsActive = false;
                 this.rainCleanup?.();
                 this.rainCleanup = null;
+                if (this.rainZoneMesh) {
+                    this.scene.remove(this.rainZoneMesh);
+                    this.rainZoneMesh.geometry.dispose();
+                    (this.rainZoneMesh.material as THREE.Material).dispose();
+                    this.rainZoneMesh = null;
+                }
             }
         }
 
@@ -586,6 +630,16 @@ export class GameEngine {
                 hp: this.localHp,
                 alive: this.localAlive,
             });
+        }
+
+        // Camera shake
+        if (this.shakeIntensity > 0.01) {
+            this.camera.position.x += (Math.random() - 0.5) * this.shakeIntensity;
+            this.camera.position.y += (Math.random() - 0.5) * this.shakeIntensity * 0.5;
+            this.shakeIntensity *= Math.max(0, 1 - this.shakeDecay * dt);
+        } else {
+            this.camera.position.set(0, 40, 30); // Reset to default
+            this.shakeIntensity = 0;
         }
 
         this.renderer.render(this.scene, this.camera);
@@ -652,7 +706,7 @@ export class GameEngine {
     private handleFiring() {
         const now = performance.now();
         const cooldown = this.hasEffect('rapid_fire')
-            ? this.config.fireCooldown * 0.3
+            ? this.config.fireCooldown * (this.hasEffect('triple_shot') ? 0.5 : 0.3)
             : this.config.fireCooldown;
 
         if (this.input.consumeFire() && now - this.lastFireTime > cooldown) {
@@ -818,12 +872,14 @@ export class GameEngine {
                 // Flash tank red + sound
                 this.flashTank(this.localTank);
                 this.audio.play('hit', 0.5);
+                this.shakeCamera(0.5);
 
                 if (this.localHp <= 0) {
                     this.localAlive = false;
                     this.localTank.group.visible = false;
                     createExplosion(this.scene, this.localX, this.localZ, this.localInfo.color);
                     this.audio.play('explosion', 0.6);
+                    this.shakeCamera(1.0);
                     this.callbacks.onDeath({
                         id: this.localId,
                         killerId: proj.shooterId,
@@ -1025,7 +1081,8 @@ export class GameEngine {
             bodyMat.transparent = false;
         }
 
-        // Landmine collision check
+        // Landmine collision check — collect detonations first
+        const toDetonate: number[] = [];
         for (let i = this.landmines.length - 1; i >= 0; i--) {
             const mine = this.landmines[i];
             // Check against local tank
@@ -1033,23 +1090,24 @@ export class GameEngine {
                 const dx = this.localX - mine.x;
                 const dz = this.localZ - mine.z;
                 if (Math.sqrt(dx * dx + dz * dz) < 1.8) {
-                    this.detonateMine(i, mine);
+                    toDetonate.push(i);
                     continue;
                 }
             }
             // Check against remote tanks
-            let detonated = false;
             for (const [id, remote] of this.remoteTanks) {
                 if (!remote.alive || id === mine.ownerId) continue;
                 const dx = remote.mesh.group.position.x - mine.x;
                 const dz = remote.mesh.group.position.z - mine.z;
                 if (Math.sqrt(dx * dx + dz * dz) < 1.8) {
-                    this.detonateMine(i, mine);
-                    detonated = true;
+                    toDetonate.push(i);
                     break;
                 }
             }
-            if (detonated) continue;
+        }
+        // Process detonations in reverse order (safe for array splicing)
+        for (const idx of toDetonate) {
+            this.detonateMine(idx, this.landmines[idx]);
         }
     }
 

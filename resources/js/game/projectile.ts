@@ -114,11 +114,11 @@ export function updateProjectile(
                 projectile.vz *= -1;
                 nz = wasTop ? top - radius : bottom + radius;
             } else {
-                // Corner case — reverse both
+                // Corner case — reverse both and nudge away
                 projectile.vx *= -1;
                 projectile.vz *= -1;
-                nx = mesh.position.x;
-                nz = mesh.position.z;
+                nx = mesh.position.x + Math.sign(projectile.vx) * 0.3;
+                nz = mesh.position.z + Math.sign(projectile.vz) * 0.3;
             }
 
             projectile.bounceCount++;
@@ -203,6 +203,11 @@ export function createMuzzleFlash(scene: THREE.Scene, x: number, z: number) {
 
     let frame = 0;
     const animate = () => {
+        if (!flash.parent) { // Already removed from scene (game ended)
+            geo.dispose();
+            mat.dispose();
+            return;
+        }
         frame++;
         flash.scale.multiplyScalar(1.15);
         mat.opacity -= 0.15;
@@ -244,6 +249,13 @@ export function createExplosion(scene: THREE.Scene, x: number, z: number, color:
 
     let elapsed = 0;
     const animate = () => {
+        if (!particles[0]?.parent) { // Already removed from scene (game ended)
+            for (const p of particles) {
+                p.geometry.dispose();
+                (p.material as THREE.Material).dispose();
+            }
+            return;
+        }
         elapsed += 0.016;
         for (let i = 0; i < particles.length; i++) {
             particles[i].position.add(velocities[i].clone().multiplyScalar(0.016));

@@ -15,18 +15,21 @@ Route::middleware(['auth', 'verified'])->group(function () {
 });
 
 // API endpoints for game tracking
-Route::post('/api/game/report', [GameController::class, 'reportGameEnd']);
-Route::post('/api/game/room/register', [GameController::class, 'registerRoom']);
-Route::post('/api/game/room/unregister', [GameController::class, 'unregisterRoom']);
-Route::post('/api/game/room/update', [GameController::class, 'updateRoom']);
-Route::get('/api/leaderboard/top', [LeaderboardController::class, 'topPlayers']);
-Route::get('/api/leaderboard/recent', [LeaderboardController::class, 'recentGames']);
-Route::get('/api/rooms', [LeaderboardController::class, 'activeRooms']);
+Route::middleware('throttle:30,1')->group(function () {
+    Route::post('/api/game/report', [GameController::class, 'reportGameEnd']);
+    Route::post('/api/game/room/register', [GameController::class, 'registerRoom']);
+    Route::post('/api/game/room/unregister', [GameController::class, 'unregisterRoom']);
+    Route::post('/api/game/room/update', [GameController::class, 'updateRoom']);
+    Route::post('/api/game/session/save', [GameController::class, 'saveSession']);
+    Route::post('/api/game/session/clear', [GameController::class, 'clearRoomSessions']);
+});
 
-// Game session persistence
-Route::post('/api/game/session/save', [GameController::class, 'saveSession']);
-Route::get('/api/game/session', [GameController::class, 'getSession']);
-Route::get('/api/game/session/room', [GameController::class, 'getRoomSessions']);
-Route::post('/api/game/session/clear', [GameController::class, 'clearRoomSessions']);
+Route::middleware('throttle:60,1')->group(function () {
+    Route::get('/api/leaderboard/top', [LeaderboardController::class, 'topPlayers']);
+    Route::get('/api/leaderboard/recent', [LeaderboardController::class, 'recentGames']);
+    Route::get('/api/rooms', [LeaderboardController::class, 'activeRooms']);
+    Route::get('/api/game/session', [GameController::class, 'getSession']);
+    Route::get('/api/game/session/room', [GameController::class, 'getRoomSessions']);
+});
 
 require __DIR__.'/settings.php';

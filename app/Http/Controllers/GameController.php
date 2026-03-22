@@ -54,6 +54,25 @@ class GameController extends Controller
             'players.*.won' => 'required|boolean',
         ]);
 
+        // Sanity checks
+        if (count($validated['players']) !== $validated['player_count']) {
+            return response()->json(['error' => 'Player count mismatch'], 422);
+        }
+
+        $winnerFound = false;
+        foreach ($validated['players'] as $player) {
+            if ($player['kills'] > 50 || $player['deaths'] > 50) {
+                return response()->json(['error' => 'Invalid stats'], 422);
+            }
+            if ($player['identifier'] === $validated['winner_identifier']) {
+                $winnerFound = true;
+            }
+        }
+
+        if (!$winnerFound) {
+            return response()->json(['error' => 'Winner not in players list'], 422);
+        }
+
         DB::transaction(function () use ($validated) {
             GameResult::create([
                 'room_code' => $validated['room_code'],
@@ -234,7 +253,7 @@ class GameController extends Controller
             $guestId = $request->session()->get('game_guest_id');
 
             if (! $guestId) {
-                $guestId = 'guest-' . Str::random(8);
+                $guestId = 'guest-' . Str::random(16);
                 $request->session()->put('game_guest_id', $guestId);
             }
 
