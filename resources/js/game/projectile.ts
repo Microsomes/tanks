@@ -12,10 +12,14 @@ export function createProjectile(
     maxBounces: number,
     shooterId: string,
     scene: THREE.Scene,
+    damage = 1,
+    color = '#ffffff',
 ): Projectile {
+    const tankColor = new THREE.Color(color);
+
     // Projectile sphere
     const geo = new THREE.SphereGeometry(0.2, 6, 4);
-    const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    const mat = new THREE.MeshBasicMaterial({ color: tankColor });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.set(x, 0.5, z);
     scene.add(mesh);
@@ -23,7 +27,7 @@ export function createProjectile(
     // Glow
     const glowGeo = new THREE.SphereGeometry(0.35, 6, 4);
     const glowMat = new THREE.MeshBasicMaterial({
-        color: 0xffaa44,
+        color: tankColor,
         transparent: true,
         opacity: 0.4,
     });
@@ -34,7 +38,7 @@ export function createProjectile(
     const trailPoints = [new THREE.Vector3(x, 0.5, z)];
     const trailGeo = new THREE.BufferGeometry().setFromPoints(trailPoints);
     const trailMat = new THREE.LineBasicMaterial({
-        color: 0xffaa44,
+        color: tankColor,
         transparent: true,
         opacity: 0.6,
     });
@@ -55,6 +59,7 @@ export function createProjectile(
         bounceCount: 0,
         shooterId,
         alive: true,
+        damage,
     };
 }
 

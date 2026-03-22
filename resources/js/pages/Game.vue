@@ -5,8 +5,17 @@ import Echo from 'laravel-echo';
 import Pusher from 'pusher-js';
 import { GameEngine } from '@/game/engine';
 import { GameNetwork } from '@/game/network';
-import { DEFAULT_CONFIG, TANK_COLORS } from '@/game/types';
-import type { PlayerInfo, GamePhase, TankState, FireEvent, HitEvent } from '@/game/types';
+import { DEFAULT_CONFIG, TANK_COLORS, GULAG_CONFIG } from '@/game/types';
+import type { PlayerInfo, GamePhase, TankState, FireEvent, HitEvent, ActiveEffect, PowerupType, RainBulletsEvent, GulagEvent } from '@/game/types';
+import type { MapName } from '@/game/arena';
+import { MAP_NAMES } from '@/game/arena';
+
+const props = defineProps<{
+    topPlayers?: { id: number; identifier: string; nickname: string; games_played: number; wins: number; kills: number; deaths: number }[];
+    activeRooms?: { id: number; room_code: string; host_name: string; map_name: string; player_count: number; players_json: string[] | null; status: string; max_players: number }[];
+    recentGames?: { id: number; room_code: string; map_name: string; player_count: number; winner_name: string; created_at: string }[];
+    activeSession?: { room_code: string; player_identifier: string; nickname: string; color: string; map_name: string; spawn_index: number; hp: number; x: number; z: number; alive: boolean; is_admin: boolean } | null;
+}>();
 
 // ─── State ───────────────────────────────────────────────────────
 const phase = ref<GamePhase>('lobby');
@@ -23,7 +32,17 @@ const alive = ref(true);
 const winner = ref('');
 const winnerId = ref('');
 const killFeed = reactive<{ killer: string; target: string; time: number }[]>([]);
+const activeEffects = reactive<ActiveEffect[]>([]);
+const gameKills = reactive<Record<string, number>>({});
+const gameDeaths = reactive<Record<string, number>>({});
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+const selectedMap = ref<MapName>('classic');
+const gulagActive = ref(false);
+const gulagCountdown = ref(0);
+const gulagUsed = new Set<string>();
+const spectating = ref(false);
+const now = ref(performance.now());
+let effectTickInterval: number | null = null;
 
 interface LobbyPlayer {
     id: string;
@@ -37,9 +56,13 @@ const players = reactive<LobbyPlayer[]>([]);
 const localReady = ref(false);
 const errorMsg = ref('');
 
+const reconnecting = ref(false);
+let lastSessionSave = 0;
+
 let network: GameNetwork | null = null;
 let engine: GameEngine | null = null;
 let echo: Echo<'reverb'> | null = null;
+let currentSpawnAssignments: Record<string, number> = {};
 
 const MAX_PLAYERS = 8;
 
@@ -91,6 +114,7 @@ function initEcho() {
             },
             params: {
                 nickname: nickname.value,
+                color: selectedColor.value,
             },
         },
     });
@@ -107,6 +131,15 @@ async function createRoom() {
     roomCode.value = code;
     isAdmin.value = true;
     await joinChannel(code);
+    history.replaceState(null, '', '?code=' + roomCode.value);
+    apiPost('/api/game/room/register', {
+        room_code: code,
+        host_name: nickname.value,
+        map_name: selectedMap.value,
+        player_count: 1,
+        status: 'lobby',
+        player_names: [nickname.value],
+    });
 }
 
 async function joinRoom() {
@@ -123,6 +156,7 @@ async function joinRoom() {
     roomCode.value = code;
     isAdmin.value = false;
     await joinChannel(code);
+    history.replaceState(null, '', '?code=' + roomCode.value);
 
     if (players.length > MAX_PLAYERS) {
         errorMsg.value = 'Room is full (max 8 players)';
@@ -132,6 +166,68 @@ async function joinRoom() {
         players.splice(0, players.length);
         return;
     }
+}
+
+async function spectateRoom(code: string, mapName: string) {
+    if (!nickname.value.trim()) {
+        nickname.value = 'Spectator';
+    }
+    spectating.value = true;
+    roomCode.value = code;
+    isAdmin.value = false;
+    selectedMap.value = mapName as MapName;
+    await joinChannel(code);
+
+    // Go straight to playing phase as spectator
+    phase.value = 'playing';
+    effectTickInterval = window.setInterval(() => { now.value = performance.now(); }, 200);
+    await nextTick();
+    if (!canvasRef.value) return;
+
+    const localInfo: PlayerInfo = {
+        id: localId.value,
+        name: nickname.value,
+        color: '#666666',
+        isAdmin: false,
+    };
+
+    engine = new GameEngine(canvasRef.value, localId.value, localInfo, {
+        onFire() {},
+        onTankState() {},
+        onHit() {},
+        onDeath() {},
+        onGameOver() {},
+        onHpChange() {},
+        onKill(killerName, targetName) {
+            killFeed.push({ killer: killerName, target: targetName, time: Date.now() });
+            if (killFeed.length > 5) killFeed.shift();
+        },
+        onPowerupSpawn() {},
+        onPowerupPickup() {},
+        onEffectsChange() {},
+        onRainBullets() {},
+        onGulag() {},
+    }, undefined, mapName as MapName);
+
+    engine.init();
+    // Hide local tank — spectator has no tank
+    engine.spawnLocal(0);
+    engine.setSpectateMode(true);
+
+    // Add all current players as remote tanks
+    for (const p of players) {
+        if (p.id !== localId.value) {
+            engine.addRemoteTank(p.id, {
+                id: p.id,
+                name: p.name,
+                color: p.color,
+                isAdmin: p.isAdmin,
+            }, 0);
+        }
+    }
+
+    engine.start();
+    alive.value = false;
 }
 
 async function joinChannel(code: string) {
@@ -175,6 +271,23 @@ async function joinChannel(code: string) {
                 isAdmin: false,
                 ready: false,
             });
+            if (engine) {
+                // Player reconnected mid-game — show notification and re-add their tank
+                killFeed.push({ killer: 'SYSTEM', target: `${member.name} reconnected`, time: Date.now() });
+                if (killFeed.length > 5) killFeed.shift();
+                network?.sendPlayerReconnect({ id: member.id, name: member.name });
+                // Re-add their tank at their saved spawn position
+                const spawnIdx = currentSpawnAssignments[member.id] ?? 0;
+                engine.addRemoteTank(member.id, {
+                    id: member.id,
+                    name: member.name,
+                    color: member.color || TANK_COLORS[0],
+                    isAdmin: false,
+                }, spawnIdx);
+            }
+            if (isAdmin.value) {
+                syncRoom();
+            }
         },
         onPlayerLeave(member) {
             const idx = players.findIndex(p => p.id === member.id);
@@ -186,7 +299,18 @@ async function joinChannel(code: string) {
                 }
             }
             if (engine) {
+                killFeed.push({ killer: 'SYSTEM', target: `${member.name} disconnected`, time: Date.now() });
+                if (killFeed.length > 5) killFeed.shift();
                 engine.removeRemoteTank(member.id);
+            }
+            if (players.length === 1) {
+                // Only we remain — if we're admin, sync; room will show 1 player
+                syncRoom();
+            } else if (players.length === 0) {
+                // Everyone left
+                apiPost('/api/game/room/unregister', { room_code: roomCode.value });
+            } else {
+                syncRoom();
             }
         },
         onColorChange(data) {
@@ -208,18 +332,81 @@ async function joinChannel(code: string) {
         },
         onDeath(data) {
             engine?.handleRemoteDeath(data.id, data.killerId);
-            checkWinCondition();
+            // Admin rolls gulag for remote deaths
+            if (isAdmin.value && !gulagUsed.has(data.id)) {
+                if (Math.random() < GULAG_CONFIG.chance) {
+                    gulagUsed.add(data.id);
+                    const spawnIndex = Math.floor(Math.random() * 8);
+                    const gulagEvent: GulagEvent = { playerId: data.id, spawnIndex };
+                    network?.sendGulag(gulagEvent);
+                    handleGulagEvent(gulagEvent);
+                } else {
+                    checkWinCondition();
+                }
+            } else {
+                checkWinCondition();
+            }
         },
         onGameStart(data) {
-            startGame(data.countdown, data.spawnAssignments);
+            startGame(data.countdown, data.spawnAssignments, data.mapName as MapName);
         },
         onGameOver(data) {
             phase.value = 'gameover';
             winner.value = data.winnerName;
             winnerId.value = data.winnerId;
+            clearSessionStorage();
         },
         onRestart() {
             resetGame();
+        },
+        onPowerupSpawn(event) {
+            engine?.spawnPowerup(event);
+        },
+        onPowerupPickup(event) {
+            engine?.handleRemotePowerupPickup(event);
+        },
+        onRainBullets(event: RainBulletsEvent) {
+            engine?.startRainBullets(event.activatorId);
+        },
+        onMapChange(data) {
+            selectedMap.value = data.mapName as MapName;
+        },
+        onGulag(event: GulagEvent) {
+            handleGulagEvent(event);
+        },
+        onRequestState(data) {
+            // Only the admin responds with the current game state
+            if (engine && isAdmin.value) {
+                network?.sendGameState({
+                    spawnAssignments: currentSpawnAssignments,
+                    mapName: selectedMap.value,
+                    phase: phase.value,
+                });
+            }
+        },
+        onGameState(data) {
+            if (reconnecting.value && data.phase === 'playing') {
+                reconnecting.value = false;
+                const savedSpawn = Number(sessionStorage.getItem('tanks_spawn_index') || '0');
+                const assignments: Record<string, number> = { ...data.spawnAssignments };
+                // Ensure our ID is in the assignments
+                if (!(localId.value in assignments)) {
+                    assignments[localId.value] = savedSpawn;
+                }
+                startGame(0, assignments, data.mapName as MapName);
+            }
+        },
+        onPlayerDisconnect(data) {
+            if (engine) {
+                killFeed.push({ killer: 'SYSTEM', target: `${data.name} disconnected`, time: Date.now() });
+                if (killFeed.length > 5) killFeed.shift();
+            }
+        },
+        onPlayerReconnect(data) {
+            if (engine) {
+                killFeed.push({ killer: 'SYSTEM', target: `${data.name} reconnected`, time: Date.now() });
+                if (killFeed.length > 5) killFeed.shift();
+            }
         },
     });
 
@@ -241,26 +428,31 @@ function adminStartGame() {
         assignments[p.id] = i;
     });
 
-    network?.sendGameStart({ countdown: 3, spawnAssignments: assignments });
-    startGame(3, assignments);
+    network?.sendGameStart({ countdown: 3, spawnAssignments: assignments, mapName: selectedMap.value });
+    startGame(3, assignments, selectedMap.value);
+    syncRoom({ status: 'playing' });
 }
 
-async function startGame(countdownSec: number, spawnAssignments: Record<string, number>) {
-    phase.value = 'countdown';
-    countdown.value = countdownSec;
+async function startGame(countdownSec: number, spawnAssignments: Record<string, number>, mapName: MapName = 'classic') {
+    currentSpawnAssignments = { ...spawnAssignments };
     myHp.value = DEFAULT_CONFIG.maxHp;
     alive.value = true;
     winner.value = '';
     killFeed.splice(0, killFeed.length);
 
-    // Countdown
-    for (let i = countdownSec; i > 0; i--) {
-        countdown.value = i;
-        await sleep(1000);
+    // Countdown (skip if 0, e.g. reconnecting)
+    if (countdownSec > 0) {
+        phase.value = 'countdown';
+        countdown.value = countdownSec;
+        for (let i = countdownSec; i > 0; i--) {
+            countdown.value = i;
+            await sleep(1000);
+        }
+        countdown.value = 0;
     }
-    countdown.value = 0;
 
     phase.value = 'playing';
+    effectTickInterval = window.setInterval(() => { now.value = performance.now(); }, 200);
     await nextTick();
 
     if (!canvasRef.value) return;
@@ -275,11 +467,27 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
     };
 
     engine = new GameEngine(canvasRef.value, localId.value, localInfo, {
+
         onFire(event) {
             network?.sendFire(event);
         },
         onTankState(state) {
             network?.sendTankState(state);
+            // Save position to DB every 5 seconds
+            const t = Date.now();
+            if (t - lastSessionSave > 5000) {
+                lastSessionSave = t;
+                apiPost('/api/game/session/save', {
+                    room_code: roomCode.value,
+                    player_identifier: localId.value,
+                    nickname: nickname.value,
+                    hp: myHp.value,
+                    x: state.x,
+                    z: state.z,
+                    body_rotation: state.bodyRotation,
+                    alive: alive.value,
+                });
+            }
         },
         onHit(data) {
             network?.sendHit(data);
@@ -287,13 +495,30 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
         onDeath(data) {
             alive.value = false;
             network?.sendDeath(data);
-            checkWinCondition();
+            // Admin rolls gulag for local death too
+            if (isAdmin.value && !gulagUsed.has(data.id)) {
+                if (Math.random() < GULAG_CONFIG.chance) {
+                    gulagUsed.add(data.id);
+                    const spawnIndex = Math.floor(Math.random() * 8);
+                    const gulagEvent: GulagEvent = { playerId: data.id, spawnIndex };
+                    network?.sendGulag(gulagEvent);
+                    handleGulagEvent(gulagEvent);
+                } else {
+                    checkWinCondition();
+                }
+            } else {
+                checkWinCondition();
+            }
         },
         onGameOver(data) {
             phase.value = 'gameover';
             winner.value = data.winnerName;
             winnerId.value = data.winnerId;
             network?.sendGameOver(data);
+            clearSessionStorage();
+            if (isAdmin.value) {
+                reportGameEnd(data.winnerName, data.winnerId);
+            }
         },
         onHpChange(hp) {
             myHp.value = hp;
@@ -303,7 +528,22 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
             // Keep only last 5
             if (killFeed.length > 5) killFeed.shift();
         },
-    });
+        onPowerupSpawn(event) {
+            network?.sendPowerupSpawn(event);
+        },
+        onPowerupPickup(event) {
+            network?.sendPowerupPickup(event);
+        },
+        onEffectsChange(effects) {
+            activeEffects.splice(0, activeEffects.length, ...effects);
+        },
+        onRainBullets(event: RainBulletsEvent) {
+            network?.sendRainBullets(event);
+        },
+        onGulag(event: GulagEvent) {
+            network?.sendGulag(event);
+        },
+    }, undefined, mapName);
 
     engine.init();
     engine.spawnLocal(spawnAssignments[localId.value] ?? 0);
@@ -321,6 +561,38 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
     }
 
     engine.start();
+
+    // Save session state for reconnection (local + DB)
+    sessionStorage.setItem('tanks_room_code', roomCode.value);
+    sessionStorage.setItem('tanks_nickname', nickname.value);
+    sessionStorage.setItem('tanks_color', selectedColor.value);
+    sessionStorage.setItem('tanks_map', mapName);
+    sessionStorage.setItem('tanks_spawn_index', String(spawnAssignments[localId.value] ?? 0));
+    apiPost('/api/game/session/save', {
+        room_code: roomCode.value,
+        player_identifier: localId.value,
+        nickname: nickname.value,
+        color: selectedColor.value,
+        map_name: mapName,
+        spawn_index: spawnAssignments[localId.value] ?? 0,
+        hp: DEFAULT_CONFIG.maxHp,
+        x: 0,
+        z: 0,
+        alive: true,
+        is_admin: isAdmin.value,
+    });
+}
+
+function clearSessionStorage() {
+    sessionStorage.removeItem('tanks_room_code');
+    sessionStorage.removeItem('tanks_nickname');
+    sessionStorage.removeItem('tanks_color');
+    sessionStorage.removeItem('tanks_map');
+    sessionStorage.removeItem('tanks_spawn_index');
+    // Also clear DB session
+    if (roomCode.value) {
+        apiPost('/api/game/session/clear', { room_code: roomCode.value });
+    }
 }
 
 function checkWinCondition() {
@@ -353,7 +625,47 @@ function checkWinCondition() {
         winnerId.value = wId;
         if (isAdmin.value) {
             network?.sendGameOver({ winnerId: wId, winnerName: wName });
+            reportGameEnd(wName, wId);
         }
+    }
+}
+
+// ─── Map Selection ──────────────────────────────────────────────
+function selectMap(map: MapName) {
+    if (!isAdmin.value) return;
+    selectedMap.value = map;
+    network?.sendMapChange({ mapName: map });
+}
+
+// ─── Gulag System ───────────────────────────────────────────────
+async function handleGulagEvent(event: GulagEvent) {
+    const player = players.find(p => p.id === event.playerId);
+    const playerName = player?.name || 'Unknown';
+
+    // Show in kill feed
+    killFeed.push({ killer: 'GULAG', target: `${playerName} gets a second chance!`, time: Date.now() });
+    if (killFeed.length > 5) killFeed.shift();
+
+    if (event.playerId === localId.value) {
+        // Local player got gulag
+        gulagActive.value = true;
+        gulagCountdown.value = 3;
+
+        for (let i = 3; i > 0; i--) {
+            gulagCountdown.value = i;
+            await sleep(1000);
+        }
+
+        gulagCountdown.value = 0;
+        engine?.respawnFromGulag(event.playerId, event.spawnIndex);
+        alive.value = true;
+        myHp.value = GULAG_CONFIG.respawnHp;
+        gulagActive.value = false;
+        // Don't check win condition — we just respawned
+    } else {
+        // Remote player got gulag — respawn after delay
+        await sleep(GULAG_CONFIG.respawnDelay);
+        engine?.respawnFromGulag(event.playerId, event.spawnIndex);
     }
 }
 
@@ -367,8 +679,19 @@ function resetGame() {
     winnerId.value = '';
     localReady.value = false;
     killFeed.splice(0, killFeed.length);
+    activeEffects.splice(0, activeEffects.length);
+    gulagActive.value = false;
+    gulagCountdown.value = 0;
+    gulagUsed.clear();
+    spectating.value = false;
+    reconnecting.value = false;
+    currentSpawnAssignments = {};
+    if (effectTickInterval) { clearInterval(effectTickInterval); effectTickInterval = null; }
     // Reset ready state for all players
     players.forEach(p => p.ready = false);
+    // Clear reconnection data
+    clearSessionStorage();
+    history.replaceState(null, '', '/');
 }
 
 function adminRestart() {
@@ -377,7 +700,87 @@ function adminRestart() {
 }
 
 // ─── Lifecycle ───────────────────────────────────────────────────
-onMounted(() => {
+function handleBeforeUnload() {
+    // Don't unregister if we're in a game — we might be reconnecting
+    if (phase.value === 'playing' || phase.value === 'countdown') {
+        return;
+    }
+    if (roomCode.value) {
+        const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+        fetch('/api/game/room/unregister', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf },
+            body: JSON.stringify({ room_code: roomCode.value }),
+            keepalive: true,
+        }).catch(() => {});
+    }
+}
+
+onMounted(async () => {
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    // Check for saved session — attempt reconnection
+    const savedRoom = sessionStorage.getItem('tanks_room_code');
+    const savedNick = sessionStorage.getItem('tanks_nickname');
+    if (savedRoom && savedNick) {
+        try {
+            nickname.value = savedNick;
+            selectedColor.value = sessionStorage.getItem('tanks_color') || TANK_COLORS[0];
+            roomCode.value = savedRoom;
+            reconnecting.value = true;
+            await joinChannel(savedRoom);
+            history.replaceState(null, '', '?code=' + roomCode.value);
+            // Request game state from other players
+            network?.sendRequestState({ requesterId: localId.value });
+            // If no response within 3 seconds, fall back to lobby
+            setTimeout(() => {
+                if (reconnecting.value) {
+                    reconnecting.value = false;
+                    // Game is no longer running, just stay in lobby
+                    clearSessionStorage();
+                }
+            }, 3000);
+            return;
+        } catch {
+            // Reconnection failed, clear and fall through to normal flow
+            clearSessionStorage();
+            reconnecting.value = false;
+            roomCode.value = '';
+        }
+    }
+
+    // Check server-side active session (covers cleared sessionStorage)
+    if (!reconnecting.value && props.activeSession) {
+        const s = props.activeSession;
+        try {
+            nickname.value = s.nickname;
+            selectedColor.value = s.color;
+            roomCode.value = s.room_code;
+            selectedMap.value = s.map_name as MapName;
+            reconnecting.value = true;
+            // Restore sessionStorage from DB
+            sessionStorage.setItem('tanks_room_code', s.room_code);
+            sessionStorage.setItem('tanks_nickname', s.nickname);
+            sessionStorage.setItem('tanks_color', s.color);
+            sessionStorage.setItem('tanks_map', s.map_name);
+            sessionStorage.setItem('tanks_spawn_index', String(s.spawn_index));
+            await joinChannel(s.room_code);
+            history.replaceState(null, '', '?code=' + s.room_code);
+            network?.sendRequestState({ requesterId: localId.value });
+            setTimeout(() => {
+                if (reconnecting.value) {
+                    reconnecting.value = false;
+                    clearSessionStorage();
+                }
+            }, 3000);
+            return;
+        } catch {
+            clearSessionStorage();
+            reconnecting.value = false;
+            roomCode.value = '';
+        }
+    }
+
     const params = new URLSearchParams(window.location.search);
     const code = params.get('code');
     if (code && code.length === 4) {
@@ -387,8 +790,13 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+    window.removeEventListener('beforeunload', handleBeforeUnload);
+    if (isAdmin.value && roomCode.value) {
+        apiPost('/api/game/room/unregister', { room_code: roomCode.value });
+    }
     engine?.destroy();
     network?.leave();
+    if (effectTickInterval) { clearInterval(effectTickInterval); effectTickInterval = null; }
 });
 
 function sleep(ms: number) {
@@ -402,6 +810,87 @@ function copyRoomCode() {
 function copyJoinLink() {
     const url = `${window.location.origin}/game?code=${roomCode.value}`;
     navigator.clipboard.writeText(url);
+}
+
+async function apiPost(url: string, data: Record<string, any>) {
+    const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf },
+        body: JSON.stringify(data),
+    }).catch(() => {});
+}
+
+function syncRoom(extra: Record<string, any> = {}) {
+    if (!isAdmin.value || !roomCode.value) return;
+    apiPost('/api/game/room/update', {
+        room_code: roomCode.value,
+        player_count: players.length,
+        status: phase.value === 'playing' ? 'playing' : 'lobby',
+        map_name: selectedMap.value,
+        player_names: players.map(p => p.name),
+        ...extra,
+    });
+}
+
+function reportGameEnd(winnerName: string, winnerPlayerId: string) {
+    const playerStats = players.map(p => ({
+        identifier: p.id,
+        nickname: p.name,
+        kills: 0,
+        deaths: 0,
+        won: p.id === winnerPlayerId,
+    }));
+
+    apiPost('/api/game/report', {
+        room_code: roomCode.value,
+        winner_name: winnerName,
+        winner_identifier: winnerPlayerId,
+        player_count: players.length,
+        map_name: selectedMap.value,
+        players: playerStats,
+    });
+}
+
+function effectLabel(type: PowerupType): string {
+    const labels: Record<PowerupType, string> = {
+        triple_shot: 'TRIPLE',
+        speed_boost: 'SPEED',
+        shield: 'SHIELD',
+        rapid_fire: 'RAPID',
+        health: 'HP',
+        rain_bullets: 'RAINFIRE',
+        mega_bounce: 'BOUNCE',
+        ghost: 'GHOST',
+        magnet: 'MAGNET',
+        freeze: 'FREEZE',
+        big_shot: 'BIG SHOT',
+        landmine: 'MINE',
+    };
+    return labels[type];
+}
+
+function effectTimeLeft(effect: ActiveEffect): string {
+    const secs = Math.max(0, Math.ceil((effect.expiresAt - now.value) / 1000));
+    return `${secs}s`;
+}
+
+function effectStyle(type: PowerupType): string {
+    const styles: Record<PowerupType, string> = {
+        triple_shot: 'bg-orange-500/80 text-black',
+        speed_boost: 'bg-blue-400/80 text-black',
+        shield: 'bg-emerald-400/80 text-black',
+        rapid_fire: 'bg-yellow-400/80 text-black',
+        health: 'bg-red-500/80 text-white',
+        rain_bullets: 'bg-orange-600/80 text-white',
+        mega_bounce: 'bg-purple-500/80 text-white',
+        ghost: 'bg-gray-400/80 text-black',
+        magnet: 'bg-fuchsia-500/80 text-white',
+        freeze: 'bg-cyan-400/80 text-black',
+        big_shot: 'bg-rose-500/80 text-white',
+        landmine: 'bg-amber-700/80 text-white',
+    };
+    return styles[type];
 }
 
 function pickAvailableColor(used: Set<string>): string {
@@ -431,7 +920,7 @@ function toggleReady() {
 
     <!-- LOBBY -->
     <div v-if="phase === 'lobby' && !roomCode" class="min-h-screen bg-[#1a1a2e] flex items-center justify-center">
-        <div class="w-full max-w-md p-8">
+        <div class="w-full max-w-2xl p-8">
             <!-- Title -->
             <div class="text-center mb-10">
                 <h1 class="text-6xl font-black text-white tracking-tight">
@@ -497,6 +986,77 @@ function toggleReady() {
             </div>
 
             <p v-if="errorMsg" class="text-red-400 text-sm text-center mt-4 font-mono">{{ errorMsg }}</p>
+
+            <!-- Active Rooms -->
+            <div class="mt-8">
+                <h3 class="text-lg font-bold text-white font-mono mb-3">Active Rooms</h3>
+                <div v-if="props.activeRooms?.length" class="space-y-2 max-h-72 overflow-y-auto">
+                    <div v-for="room in props.activeRooms" :key="room.id"
+                         class="px-4 py-3 bg-[#2a2a4a] rounded-lg border border-[#3a3a6a]">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center gap-2">
+                                <span class="text-emerald-400 font-mono font-bold tracking-wider">{{ room.room_code }}</span>
+                                <span class="text-gray-600 text-xs font-mono">{{ room.map_name }}</span>
+                                <span class="text-xs font-mono px-2 py-0.5 rounded"
+                                      :class="room.status === 'playing' ? 'bg-red-500/20 text-red-400' : 'bg-emerald-500/20 text-emerald-400'">
+                                    {{ room.status === 'playing' ? 'IN GAME' : 'LOBBY' }}
+                                </span>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <span class="text-gray-400 text-xs font-mono">{{ room.player_count }}/{{ room.max_players }}</span>
+                                <button v-if="room.status === 'lobby' && room.player_count < room.max_players"
+                                        @click="roomCodeInput = room.room_code; joinRoom()"
+                                        :disabled="!nickname.trim()"
+                                        class="px-3 py-1 text-xs font-bold rounded font-mono transition-colors"
+                                        :class="nickname.trim()
+                                            ? 'bg-blue-500 hover:bg-blue-400 text-black'
+                                            : 'bg-gray-700 text-gray-500 cursor-not-allowed'"
+                                        :title="!nickname.trim() ? 'Enter a nickname first' : ''">
+                                    JOIN
+                                </button>
+                                <button v-else-if="room.status === 'playing'"
+                                        @click="spectateRoom(room.room_code, room.map_name)"
+                                        class="px-3 py-1 bg-purple-500 hover:bg-purple-400 text-white text-xs font-bold rounded font-mono transition-colors">
+                                    SPECTATE
+                                </button>
+                                <span v-else-if="room.player_count >= room.max_players" class="text-gray-600 text-xs font-mono">full</span>
+                            </div>
+                        </div>
+                        <!-- Player names -->
+                        <div v-if="room.players_json?.length" class="mt-1.5 flex flex-wrap gap-1.5">
+                            <span v-for="name in room.players_json" :key="name"
+                                  class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#1a1a2e] text-gray-400">
+                                {{ name }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <p v-else class="text-gray-600 text-sm font-mono">No active rooms</p>
+                <p v-if="!nickname.trim() && props.activeRooms?.length" class="text-yellow-500/70 text-xs font-mono mt-2 text-center">
+                    Enter a nickname above to join a room
+                </p>
+            </div>
+
+            <!-- Top Players -->
+            <div class="mt-8">
+                <h3 class="text-lg font-bold text-white font-mono mb-3">Top Players</h3>
+                <div v-if="props.topPlayers?.length" class="space-y-1">
+                    <div v-for="(player, i) in props.topPlayers" :key="player.id"
+                         class="flex items-center justify-between px-4 py-2 rounded-lg"
+                         :class="i === 0 ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-[#2a2a4a]'">
+                        <div class="flex items-center gap-2">
+                            <span class="text-gray-500 font-mono text-xs w-5">{{ i + 1 }}</span>
+                            <span class="text-white font-mono text-sm">{{ player.nickname }}</span>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <span class="text-emerald-400 font-mono text-xs">{{ player.wins }}W</span>
+                            <span class="text-gray-500 font-mono text-xs">{{ player.kills }}K</span>
+                            <span class="text-gray-600 font-mono text-xs">{{ player.games_played }}G</span>
+                        </div>
+                    </div>
+                </div>
+                <p v-else class="text-gray-600 text-sm font-mono">No games played yet</p>
+            </div>
         </div>
     </div>
 
@@ -575,6 +1135,29 @@ function toggleReady() {
 
             <p class="text-center text-gray-600 text-xs font-mono mb-4">{{ players.length }}/{{ MAX_PLAYERS }} players</p>
 
+            <!-- Map Selection -->
+            <div class="mb-6">
+                <p class="text-gray-500 text-xs font-mono text-center mb-2">MAP</p>
+                <div class="flex justify-center gap-2 flex-wrap">
+                    <button
+                        v-for="map in MAP_NAMES"
+                        :key="map"
+                        @click="selectMap(map)"
+                        :disabled="!isAdmin"
+                        class="px-3 py-2 rounded-lg font-mono text-xs uppercase tracking-wide transition-all border"
+                        :class="[
+                            selectedMap === map
+                                ? 'bg-emerald-500/20 border-emerald-400 text-emerald-400'
+                                : isAdmin
+                                    ? 'bg-[#2a2a4a] border-[#3a3a6a] text-gray-400 hover:border-gray-400 hover:text-white'
+                                    : 'bg-[#2a2a4a] border-[#3a3a6a] text-gray-600 cursor-default',
+                        ]"
+                    >
+                        {{ map }}
+                    </button>
+                </div>
+            </div>
+
             <!-- Ready / Start -->
             <div v-if="isAdmin" class="space-y-2">
                 <button
@@ -605,6 +1188,19 @@ function toggleReady() {
         </div>
     </div>
 
+    <!-- RECONNECTING -->
+    <div v-else-if="reconnecting" class="min-h-screen bg-[#1a1a2e] flex items-center justify-center">
+        <div class="text-center">
+            <div class="text-4xl font-black text-emerald-400 font-mono animate-pulse mb-4">
+                RECONNECTING
+            </div>
+            <p class="text-gray-400 font-mono text-sm">Rejoining room {{ roomCode }}...</p>
+            <div class="mt-6 flex justify-center">
+                <div class="w-8 h-8 border-4 border-emerald-400 border-t-transparent rounded-full animate-spin"></div>
+            </div>
+        </div>
+    </div>
+
     <!-- COUNTDOWN -->
     <div v-else-if="phase === 'countdown'" class="min-h-screen bg-[#1a1a2e] flex items-center justify-center">
         <div class="text-center">
@@ -622,19 +1218,29 @@ function toggleReady() {
         <!-- HUD -->
         <div class="absolute top-0 left-0 right-0 p-4 pointer-events-none">
             <div class="flex items-start justify-between">
-                <!-- HP -->
-                <div class="flex items-center gap-2">
-                    <div class="flex gap-1">
-                        <div
-                            v-for="i in DEFAULT_CONFIG.maxHp"
-                            :key="i"
-                            class="w-8 h-3 rounded-sm transition-colors"
-                            :class="i <= myHp
-                                ? (myHp === 1 ? 'bg-red-500' : myHp === 2 ? 'bg-yellow-400' : 'bg-emerald-400')
-                                : 'bg-gray-700'"
-                        />
+                <!-- HP + Active Effects -->
+                <div>
+                    <div class="flex items-center gap-2">
+                        <div class="w-32 h-3 bg-gray-700 rounded-sm overflow-hidden">
+                            <div
+                                class="h-full rounded-sm transition-all duration-200"
+                                :style="{ width: (myHp / DEFAULT_CONFIG.maxHp * 100) + '%' }"
+                                :class="myHp / DEFAULT_CONFIG.maxHp > 0.6 ? 'bg-emerald-400' : myHp / DEFAULT_CONFIG.maxHp > 0.3 ? 'bg-yellow-400' : 'bg-red-500'"
+                            />
+                        </div>
+                        <span class="text-white font-mono text-sm">{{ myHp }}/{{ DEFAULT_CONFIG.maxHp }}</span>
                     </div>
-                    <span class="text-white font-mono text-sm">{{ myHp }}/{{ DEFAULT_CONFIG.maxHp }}</span>
+                    <div v-if="activeEffects.length" class="flex gap-1.5 mt-2">
+                        <div
+                            v-for="effect in activeEffects"
+                            :key="effect.type"
+                            class="px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wide flex items-center gap-1"
+                            :class="effectStyle(effect.type)"
+                        >
+                            {{ effectLabel(effect.type) }}
+                            <span class="opacity-70">{{ effectTimeLeft(effect) }}</span>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Room code -->
@@ -649,17 +1255,42 @@ function toggleReady() {
                 :key="i"
                 class="text-xs font-mono px-3 py-1 bg-black/50 rounded text-white"
             >
-                <span class="text-red-400">{{ kill.killer }}</span>
-                <span class="text-gray-500"> eliminated </span>
-                <span class="text-gray-300">{{ kill.target }}</span>
+                <template v-if="kill.killer === 'SYSTEM'">
+                    <span class="text-yellow-400">{{ kill.target }}</span>
+                </template>
+                <template v-else-if="kill.killer === 'GULAG'">
+                    <span class="text-yellow-400">{{ kill.killer }}</span>
+                    <span class="text-gray-500"> — </span>
+                    <span class="text-gray-300">{{ kill.target }}</span>
+                </template>
+                <template v-else>
+                    <span class="text-red-400">{{ kill.killer }}</span>
+                    <span class="text-gray-500"> eliminated </span>
+                    <span class="text-gray-300">{{ kill.target }}</span>
+                </template>
             </div>
         </div>
 
-        <!-- Dead overlay -->
-        <div v-if="!alive && phase === 'playing'" class="absolute inset-0 bg-black/50 flex items-center justify-center pointer-events-none">
+        <!-- Dead / Spectate overlay -->
+        <div v-if="!alive && phase === 'playing'" class="absolute inset-0 flex items-center justify-center pointer-events-none"
+             :class="spectating ? 'bg-black/20' : 'bg-black/50'">
             <div class="text-center">
-                <p class="text-4xl font-black text-red-500 font-mono">ELIMINATED</p>
-                <p class="text-gray-400 font-mono mt-2">Spectating...</p>
+                <template v-if="spectating">
+                    <div class="absolute top-20 left-1/2 -translate-x-1/2">
+                        <span class="px-4 py-2 bg-purple-500/30 border border-purple-400/50 rounded-lg text-purple-300 font-mono text-sm">
+                            SPECTATING
+                        </span>
+                    </div>
+                </template>
+                <template v-else-if="gulagActive">
+                    <p class="text-5xl font-black text-yellow-400 font-mono animate-pulse">GULAG!</p>
+                    <p class="text-8xl font-black text-white font-mono mt-4">{{ gulagCountdown }}</p>
+                    <p class="text-gray-400 font-mono mt-2">Respawning...</p>
+                </template>
+                <template v-else>
+                    <p class="text-4xl font-black text-red-500 font-mono">ELIMINATED</p>
+                    <p class="text-gray-400 font-mono mt-2">Spectating...</p>
+                </template>
             </div>
         </div>
 

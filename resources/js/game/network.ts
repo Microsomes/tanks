@@ -1,5 +1,5 @@
 import type Echo from 'laravel-echo';
-import type { TankState, FireEvent, HitEvent } from './types';
+import type { TankState, FireEvent, HitEvent, PowerupSpawnEvent, PowerupPickupEvent, RainBulletsEvent, GulagEvent } from './types';
 
 export type PresenceMember = { id: string; name: string; color: string };
 
@@ -13,9 +13,18 @@ export interface NetworkCallbacks {
     onFire: (event: FireEvent) => void;
     onHit: (event: HitEvent) => void;
     onDeath: (data: { id: string; killerId: string }) => void;
-    onGameStart: (data: { countdown: number; spawnAssignments: Record<string, number> }) => void;
+    onGameStart: (data: { countdown: number; spawnAssignments: Record<string, number>; mapName: string }) => void;
+    onMapChange: (data: { mapName: string }) => void;
+    onGulag: (event: GulagEvent) => void;
     onGameOver: (data: { winnerId: string; winnerName: string }) => void;
     onRestart: () => void;
+    onPowerupSpawn: (event: PowerupSpawnEvent) => void;
+    onPowerupPickup: (event: PowerupPickupEvent) => void;
+    onRainBullets: (event: RainBulletsEvent) => void;
+    onRequestState: (data: { requesterId: string }) => void;
+    onGameState: (data: { spawnAssignments: Record<string, number>; mapName: string; phase: string }) => void;
+    onPlayerDisconnect: (data: { id: string; name: string }) => void;
+    onPlayerReconnect: (data: { id: string; name: string }) => void;
 }
 
 /**
@@ -116,14 +125,41 @@ export class GameNetwork {
                 .listenForWhisper('death', (data: { id: string; killerId: string }) => {
                     this.callbacks.onDeath(data);
                 })
-                .listenForWhisper('game-start', (data: { countdown: number; spawnAssignments: Record<string, number> }) => {
+                .listenForWhisper('game-start', (data: { countdown: number; spawnAssignments: Record<string, number>; mapName: string }) => {
                     this.callbacks.onGameStart(data);
+                })
+                .listenForWhisper('map-change', (data: { mapName: string }) => {
+                    this.callbacks.onMapChange(data);
+                })
+                .listenForWhisper('gulag', (data: GulagEvent) => {
+                    this.callbacks.onGulag(data);
                 })
                 .listenForWhisper('game-over', (data: { winnerId: string; winnerName: string }) => {
                     this.callbacks.onGameOver(data);
                 })
                 .listenForWhisper('restart', () => {
                     this.callbacks.onRestart();
+                })
+                .listenForWhisper('powerup-spawn', (data: PowerupSpawnEvent) => {
+                    this.callbacks.onPowerupSpawn(data);
+                })
+                .listenForWhisper('powerup-pickup', (data: PowerupPickupEvent) => {
+                    this.callbacks.onPowerupPickup(data);
+                })
+                .listenForWhisper('rain-bullets', (data: RainBulletsEvent) => {
+                    this.callbacks.onRainBullets(data);
+                })
+                .listenForWhisper('request-state', (data: { requesterId: string }) => {
+                    this.callbacks.onRequestState(data);
+                })
+                .listenForWhisper('game-state', (data: { spawnAssignments: Record<string, number>; mapName: string; phase: string }) => {
+                    this.callbacks.onGameState(data);
+                })
+                .listenForWhisper('player-disconnect', (data: { id: string; name: string }) => {
+                    this.callbacks.onPlayerDisconnect(data);
+                })
+                .listenForWhisper('player-reconnect', (data: { id: string; name: string }) => {
+                    this.callbacks.onPlayerReconnect(data);
                 });
         });
     }
@@ -160,8 +196,16 @@ export class GameNetwork {
         this.channel?.whisper('death', data);
     }
 
-    sendGameStart(data: { countdown: number; spawnAssignments: Record<string, number> }) {
+    sendGameStart(data: { countdown: number; spawnAssignments: Record<string, number>; mapName: string }) {
         this.channel?.whisper('game-start', data);
+    }
+
+    sendMapChange(data: { mapName: string }) {
+        this.channel?.whisper('map-change', data);
+    }
+
+    sendGulag(event: GulagEvent) {
+        this.channel?.whisper('gulag', event);
     }
 
     sendGameOver(data: { winnerId: string; winnerName: string }) {
@@ -170,6 +214,34 @@ export class GameNetwork {
 
     sendRestart() {
         this.channel?.whisper('restart', {});
+    }
+
+    sendPowerupSpawn(event: PowerupSpawnEvent) {
+        this.channel?.whisper('powerup-spawn', event);
+    }
+
+    sendPowerupPickup(event: PowerupPickupEvent) {
+        this.channel?.whisper('powerup-pickup', event);
+    }
+
+    sendRainBullets(event: RainBulletsEvent) {
+        this.channel?.whisper('rain-bullets', event);
+    }
+
+    sendRequestState(data: { requesterId: string }) {
+        this.channel?.whisper('request-state', data);
+    }
+
+    sendGameState(data: { spawnAssignments: Record<string, number>; mapName: string; phase: string }) {
+        this.channel?.whisper('game-state', data);
+    }
+
+    sendPlayerDisconnect(data: { id: string; name: string }) {
+        this.channel?.whisper('player-disconnect', data);
+    }
+
+    sendPlayerReconnect(data: { id: string; name: string }) {
+        this.channel?.whisper('player-reconnect', data);
     }
 
     leave() {

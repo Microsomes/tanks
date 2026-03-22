@@ -65,40 +65,58 @@ export function createTankMesh(color: string, name: string): TankMesh {
     return { group, body, turret, barrel, hpBar, nameSprite };
 }
 
+const BAR_WIDTH = 2.0;
+const BAR_HEIGHT = 0.15;
+
 function createHpBar(): THREE.Group {
     const hpBar = new THREE.Group();
-    const segmentWidth = 0.6;
-    const gap = 0.1;
 
-    for (let i = 0; i < 3; i++) {
-        const geo = new THREE.PlaneGeometry(segmentWidth, 0.15);
-        const mat = new THREE.MeshBasicMaterial({
-            color: 0x4ade80,
-            side: THREE.DoubleSide,
-            depthTest: false,
-        });
-        const segment = new THREE.Mesh(geo, mat);
-        segment.position.x = (i - 1) * (segmentWidth + gap);
-        segment.name = `hp-${i}`;
-        hpBar.add(segment);
-    }
+    // Background (dark)
+    const bgGeo = new THREE.PlaneGeometry(BAR_WIDTH, BAR_HEIGHT);
+    const bgMat = new THREE.MeshBasicMaterial({
+        color: 0x333333,
+        side: THREE.DoubleSide,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.5,
+    });
+    const bg = new THREE.Mesh(bgGeo, bgMat);
+    bg.name = 'hp-bg';
+    hpBar.add(bg);
+
+    // Foreground (colored fill)
+    const fgGeo = new THREE.PlaneGeometry(BAR_WIDTH, BAR_HEIGHT);
+    const fgMat = new THREE.MeshBasicMaterial({
+        color: 0x4ade80,
+        side: THREE.DoubleSide,
+        depthTest: false,
+    });
+    const fg = new THREE.Mesh(fgGeo, fgMat);
+    fg.name = 'hp-fg';
+    fg.position.z = -0.001; // slightly in front
+    hpBar.add(fg);
 
     return hpBar;
 }
 
-export function updateHpBar(hpBar: THREE.Group, hp: number) {
-    for (let i = 0; i < 3; i++) {
-        const segment = hpBar.getObjectByName(`hp-${i}`) as THREE.Mesh;
-        if (!segment) continue;
-        const mat = segment.material as THREE.MeshBasicMaterial;
-        if (i < hp) {
-            mat.color.setHex(hp === 1 ? 0xf87171 : hp === 2 ? 0xfacc15 : 0x4ade80);
-            mat.opacity = 1;
-        } else {
-            mat.color.setHex(0x333333);
-            mat.opacity = 0.3;
-        }
-        mat.transparent = true;
+export function updateHpBar(hpBar: THREE.Group, hp: number, maxHp = 5) {
+    const fg = hpBar.getObjectByName('hp-fg') as THREE.Mesh;
+    if (!fg) return;
+
+    const ratio = Math.max(0, hp) / maxHp;
+    const mat = fg.material as THREE.MeshBasicMaterial;
+
+    // Scale width and shift left so bar drains from right
+    fg.scale.x = ratio;
+    fg.position.x = -(BAR_WIDTH * (1 - ratio)) / 2;
+
+    // Color based on ratio
+    if (ratio > 0.6) {
+        mat.color.setHex(0x4ade80); // green
+    } else if (ratio > 0.3) {
+        mat.color.setHex(0xfacc15); // yellow
+    } else {
+        mat.color.setHex(0xf87171); // red
     }
 }
 

@@ -45,7 +45,7 @@ export interface GameConfig {
 }
 
 export const DEFAULT_CONFIG: GameConfig = {
-    maxHp: 3,
+    maxHp: 5,
     maxBounces: 3,
     projectileSpeed: 25,
     fireCooldown: 800,
@@ -99,6 +99,68 @@ export interface Projectile {
     bounceCount: number;
     shooterId: string;
     alive: boolean;
+    damage: number;
 }
 
 export type GamePhase = 'lobby' | 'countdown' | 'playing' | 'gameover';
+
+// ─── Powerups ────────────────────────────────────────────────────
+export type PowerupType =
+    | 'health' | 'triple_shot' | 'speed_boost' | 'shield' | 'rapid_fire' | 'rain_bullets'
+    | 'mega_bounce' | 'ghost' | 'magnet' | 'freeze' | 'big_shot' | 'landmine';
+
+export interface PowerupSpawnEvent {
+    id: string;
+    type: PowerupType;
+    x: number;
+    z: number;
+}
+
+export interface PowerupPickupEvent {
+    powerupId: string;
+    playerId: string;
+    type: PowerupType;
+}
+
+export interface ActiveEffect {
+    type: PowerupType;
+    expiresAt: number;
+}
+
+export const POWERUP_CONFIG = {
+    spawnIntervalMin: 5000,
+    spawnIntervalMax: 8000,
+    maxOnField: 6,
+    despawnTime: 15000,
+    pickupRadius: 2.0,
+    durations: {
+        health: 0,
+        triple_shot: 10000,
+        speed_boost: 8000,
+        shield: 15000,
+        rapid_fire: 8000,
+        rain_bullets: 5000,
+        mega_bounce: 10000,
+        ghost: 8000,
+        magnet: 12000,
+        freeze: 5000,
+        big_shot: 8000,
+        landmine: 0,
+    } as Record<PowerupType, number>,
+} as const;
+
+export interface RainBulletsEvent {
+    activatorId: string;  // player who activated it (immune)
+    startTime: number;
+}
+
+export interface GulagEvent {
+    playerId: string;
+    spawnIndex: number;
+}
+
+export const GULAG_CONFIG = {
+    chance: 0.3,        // 30% chance
+    respawnHp: 2,       // respawn with 2 HP
+    respawnDelay: 3000,  // 3 second countdown before respawn
+} as const;
