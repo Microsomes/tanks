@@ -2,12 +2,12 @@
 region: lon1
 size: s-1vcpu-1gb
 image: ubuntu-24-04-x64
-droplet_name: laravel-staging
+droplet_name: tanks
 
 # Application
 app_name: laravel
-app_domain: "template.tayyabjaved.com"                      # leave empty to use droplet IP, set a domain later
-app_repo: git@github.com:Microsomes/laravel-docker-vue-starter-2026.git
+app_domain: "tanksi.duckdns.org"                      # leave empty to use droplet IP, set a domain later
+app_repo: git@github.com:Microsomes/tanks.git
 app_branch: master
 app_path: /var/www/laravel
 deploy_user: deploy

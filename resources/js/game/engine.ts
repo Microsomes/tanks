@@ -38,7 +38,7 @@ import type {
     RainBulletsEvent,
 } from './types';
 import { DEFAULT_CONFIG, TANK_COLORS, POWERUP_CONFIG, GULAG_CONFIG } from './types';
-import type { GulagEvent } from './types';
+import type { GulagEvent, GulagResultEvent } from './types';
 
 interface RemoteTank {
     mesh: TankMesh;
@@ -198,12 +198,26 @@ export class GameEngine {
         updateHpBar(this.localTank.hpBar, this.localHp);
     }
 
-    addRemoteTank(id: string, info: PlayerInfo, spawnIndex: number) {
+    setLocalPosition(x: number, z: number, rotation: number, hp?: number) {
+        this.localX = x;
+        this.localZ = z;
+        this.localBodyRot = rotation;
+        this.localTank.group.position.set(x, 0, z);
+        this.localTank.group.rotation.y = rotation;
+        if (hp !== undefined) {
+            this.localHp = hp;
+            updateHpBar(this.localTank.hpBar, hp);
+            this.callbacks.onHpChange(hp);
+        }
+    }
+
+    addRemoteTank(id: string, info: PlayerInfo, spawnIndex: number, pos?: { x: number; z: number; rotation: number; hp?: number }) {
         if (this.remoteTanks.has(id)) return;
 
         const mesh = createTankMesh(info.color, info.name);
         const spawns = getSpawnPoints(this.config);
-        const spawn = spawns[spawnIndex % spawns.length];
+        const spawn = pos || spawns[spawnIndex % spawns.length];
+        const hp = pos?.hp ?? this.config.maxHp;
         mesh.group.position.set(spawn.x, 0, spawn.z);
         mesh.group.rotation.y = spawn.rotation;
         this.scene.add(mesh.group);
@@ -214,10 +228,11 @@ export class GameEngine {
             targetZ: spawn.z,
             targetBodyRot: spawn.rotation,
             targetTurretRot: 0,
-            hp: this.config.maxHp,
+            hp,
             alive: true,
             info,
         });
+        updateHpBar(mesh.hpBar, hp);
     }
 
     removeRemoteTank(id: string) {
@@ -351,10 +366,11 @@ export class GameEngine {
     respawnFromGulag(playerId: string, spawnIndex: number) {
         const spawns = getSpawnPoints(this.config);
         const spawn = spawns[spawnIndex % spawns.length];
+        const hp = GULAG_CONFIG.hp;
 
         if (playerId === this.localId) {
             this.localAlive = true;
-            this.localHp = GULAG_CONFIG.respawnHp;
+            this.localHp = hp;
             this.localX = spawn.x;
             this.localZ = spawn.z;
             this.localBodyRot = spawn.rotation;
@@ -367,14 +383,14 @@ export class GameEngine {
             const remote = this.remoteTanks.get(playerId);
             if (remote) {
                 remote.alive = true;
-                remote.hp = GULAG_CONFIG.respawnHp;
+                remote.hp = hp;
                 remote.targetX = spawn.x;
                 remote.targetZ = spawn.z;
                 remote.targetBodyRot = spawn.rotation;
                 remote.mesh.group.position.set(spawn.x, 0, spawn.z);
                 remote.mesh.group.rotation.y = spawn.rotation;
                 remote.mesh.group.visible = true;
-                updateHpBar(remote.mesh.hpBar, GULAG_CONFIG.respawnHp);
+                updateHpBar(remote.mesh.hpBar, hp);
             }
         }
     }

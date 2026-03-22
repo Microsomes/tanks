@@ -155,12 +155,17 @@ export interface RainBulletsEvent {
 }
 
 export interface GulagEvent {
-    playerId: string;
-    spawnIndex: number;
+    deadPlayerId: string;
+    killerPlayerId: string;
+}
+
+export interface GulagResultEvent {
+    winnerId: string;
+    loserId: string;
 }
 
 export const GULAG_CONFIG = {
-    chance: 0.3,        // 30% chance
-    respawnHp: 2,       // respawn with 2 HP
-    respawnDelay: 3000,  // 3 second countdown before respawn
+    chance: 0.3,
+    hp: 2,              // 25% of max (roughly)
+    countdownSec: 3,
 } as const;

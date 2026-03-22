@@ -1,5 +1,5 @@
 import type Echo from 'laravel-echo';
-import type { TankState, FireEvent, HitEvent, PowerupSpawnEvent, PowerupPickupEvent, RainBulletsEvent, GulagEvent } from './types';
+import type { TankState, FireEvent, HitEvent, PowerupSpawnEvent, PowerupPickupEvent, RainBulletsEvent, GulagEvent, GulagResultEvent } from './types';
 
 export type PresenceMember = { id: string; name: string; color: string };
 
@@ -16,6 +16,7 @@ export interface NetworkCallbacks {
     onGameStart: (data: { countdown: number; spawnAssignments: Record<string, number>; mapName: string }) => void;
     onMapChange: (data: { mapName: string }) => void;
     onGulag: (event: GulagEvent) => void;
+    onGulagResult: (event: GulagResultEvent) => void;
     onGameOver: (data: { winnerId: string; winnerName: string }) => void;
     onRestart: () => void;
     onPowerupSpawn: (event: PowerupSpawnEvent) => void;
@@ -134,6 +135,9 @@ export class GameNetwork {
                 .listenForWhisper('gulag', (data: GulagEvent) => {
                     this.callbacks.onGulag(data);
                 })
+                .listenForWhisper('gulag-result', (data: GulagResultEvent) => {
+                    this.callbacks.onGulagResult(data);
+                })
                 .listenForWhisper('game-over', (data: { winnerId: string; winnerName: string }) => {
                     this.callbacks.onGameOver(data);
                 })
@@ -206,6 +210,10 @@ export class GameNetwork {
 
     sendGulag(event: GulagEvent) {
         this.channel?.whisper('gulag', event);
+    }
+
+    sendGulagResult(event: GulagResultEvent) {
+        this.channel?.whisper('gulag-result', event);
     }
 
     sendGameOver(data: { winnerId: string; winnerName: string }) {

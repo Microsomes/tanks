@@ -6,7 +6,7 @@ import Pusher from 'pusher-js';
 import { GameEngine } from '@/game/engine';
 import { GameNetwork } from '@/game/network';
 import { DEFAULT_CONFIG, TANK_COLORS, GULAG_CONFIG } from '@/game/types';
-import type { PlayerInfo, GamePhase, TankState, FireEvent, HitEvent, ActiveEffect, PowerupType, RainBulletsEvent, GulagEvent } from '@/game/types';
+import type { PlayerInfo, GamePhase, TankState, FireEvent, HitEvent, ActiveEffect, PowerupType, RainBulletsEvent, GulagEvent, GulagResultEvent } from '@/game/types';
 import type { MapName } from '@/game/arena';
 import { MAP_NAMES } from '@/game/arena';
 
@@ -14,7 +14,7 @@ const props = defineProps<{
     topPlayers?: { id: number; identifier: string; nickname: string; games_played: number; wins: number; kills: number; deaths: number }[];
     activeRooms?: { id: number; room_code: string; host_name: string; map_name: string; player_count: number; players_json: string[] | null; status: string; max_players: number }[];
     recentGames?: { id: number; room_code: string; map_name: string; player_count: number; winner_name: string; created_at: string }[];
-    activeSession?: { room_code: string; player_identifier: string; nickname: string; color: string; map_name: string; spawn_index: number; hp: number; x: number; z: number; alive: boolean; is_admin: boolean } | null;
+    activeSession?: { room_code: string; player_identifier: string; nickname: string; color: string; map_name: string; spawn_index: number; hp: number; x: number; z: number; body_rotation: number; alive: boolean; is_admin: boolean } | null;
 }>();
 
 // ─── State ───────────────────────────────────────────────────────
@@ -40,8 +40,12 @@ const selectedMap = ref<MapName>('classic');
 const gulagActive = ref(false);
 const gulagCountdown = ref(0);
 const gulagUsed = new Set<string>();
+const gulagOpponent = ref('');
+const gulagInProgress = ref(false); // prevents win condition check
 const spectating = ref(false);
 const now = ref(performance.now());
+const disconnectTimer = ref(0);    // seconds remaining for reconnect grace period
+let disconnectInterval: number | null = null;
 let effectTickInterval: number | null = null;
 
 interface LobbyPlayer {
@@ -249,9 +253,13 @@ async function joinChannel(code: string) {
                 });
             });
             localId.value = myId;
-            if (members.length === 1) {
-                isAdmin.value = true;
+            // Ensure at least one player is admin
+            const hasAdmin = players.some(p => p.isAdmin);
+            if (!hasAdmin && players.length > 0) {
                 players[0].isAdmin = true;
+            }
+            if (players.find(p => p.id === myId)?.isAdmin) {
+                isAdmin.value = true;
             }
             // Pick first available color if ours is taken
             const otherColors = new Set(players.filter(p => p.id !== myId).map(p => p.color));
@@ -272,18 +280,39 @@ async function joinChannel(code: string) {
                 ready: false,
             });
             if (engine) {
+                // Cancel disconnect timer if someone rejoined
+                if (disconnectInterval) {
+                    clearInterval(disconnectInterval);
+                    disconnectInterval = null;
+                    disconnectTimer.value = 0;
+                }
                 // Player reconnected mid-game — show notification and re-add their tank
                 killFeed.push({ killer: 'SYSTEM', target: `${member.name} reconnected`, time: Date.now() });
                 if (killFeed.length > 5) killFeed.shift();
                 network?.sendPlayerReconnect({ id: member.id, name: member.name });
-                // Re-add their tank at their saved spawn position
+                // Re-add their tank — fetch last position from DB
                 const spawnIdx = currentSpawnAssignments[member.id] ?? 0;
-                engine.addRemoteTank(member.id, {
+                const tankInfo: PlayerInfo = {
                     id: member.id,
                     name: member.name,
                     color: member.color || TANK_COLORS[0],
                     isAdmin: false,
-                }, spawnIdx);
+                };
+                fetch(`/api/game/session?room_code=${roomCode.value}&player_identifier=${member.id}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.session && engine) {
+                            const s = data.session;
+                            engine.addRemoteTank(member.id, tankInfo, spawnIdx, {
+                                x: s.x, z: s.z, rotation: s.body_rotation, hp: s.hp,
+                            });
+                        } else if (engine) {
+                            engine.addRemoteTank(member.id, tankInfo, spawnIdx);
+                        }
+                    })
+                    .catch(() => {
+                        engine?.addRemoteTank(member.id, tankInfo, spawnIdx);
+                    });
             }
             if (isAdmin.value) {
                 syncRoom();
@@ -293,9 +322,14 @@ async function joinChannel(code: string) {
             const idx = players.findIndex(p => p.id === member.id);
             if (idx >= 0) players.splice(idx, 1);
             if (players.length > 0) {
-                players[0].isAdmin = true;
-                if (players[0].id === localId.value) {
+                // Ensure there's always an admin
+                const hasAdmin = players.some(p => p.isAdmin);
+                if (!hasAdmin) {
+                    players[0].isAdmin = true;
+                }
+                if (players[0].isAdmin && players[0].id === localId.value) {
                     isAdmin.value = true;
+                    engine?.setAdmin(true);
                 }
             }
             if (engine) {
@@ -304,8 +338,34 @@ async function joinChannel(code: string) {
                 engine.removeRemoteTank(member.id);
             }
             if (players.length === 1) {
-                // Only we remain — if we're admin, sync; room will show 1 player
                 syncRoom();
+                // If we're the only one left in an active game, start 30s grace period
+                if (engine && phase.value === 'playing' && !disconnectInterval) {
+                    disconnectTimer.value = 30;
+                    killFeed.push({ killer: 'SYSTEM', target: `${member.name} disconnected. Waiting 30s to rejoin...`, time: Date.now() });
+                    if (killFeed.length > 5) killFeed.shift();
+                    disconnectInterval = window.setInterval(() => {
+                        disconnectTimer.value--;
+                        if (disconnectTimer.value <= 0) {
+                            clearInterval(disconnectInterval!);
+                            disconnectInterval = null;
+                            disconnectTimer.value = 0;
+                            // Time's up — win by default
+                            if (players.length <= 1 && phase.value === 'playing') {
+                                killFeed.push({ killer: 'SYSTEM', target: 'Opponent did not rejoin. You win!', time: Date.now() });
+                                if (killFeed.length > 5) killFeed.shift();
+                                phase.value = 'gameover';
+                                winner.value = nickname.value;
+                                winnerId.value = localId.value;
+                                if (isAdmin.value) {
+                                    network?.sendGameOver({ winnerId: localId.value, winnerName: nickname.value });
+                                    reportGameEnd(nickname.value, localId.value);
+                                }
+                                clearSessionStorage();
+                            }
+                        }
+                    }, 1000);
+                }
             } else if (players.length === 0) {
                 // Everyone left
                 apiPost('/api/game/room/unregister', { room_code: roomCode.value });
@@ -332,18 +392,21 @@ async function joinChannel(code: string) {
         },
         onDeath(data) {
             engine?.handleRemoteDeath(data.id, data.killerId);
-            // Admin rolls gulag for remote deaths
-            if (isAdmin.value && !gulagUsed.has(data.id)) {
+            if (gulagInProgress.value && isAdmin.value) {
+                // Death during gulag = gulag result
+                const result: GulagResultEvent = { winnerId: data.killerId, loserId: data.id };
+                network?.sendGulagResult(result);
+                handleGulagResult(result);
+            } else if (isAdmin.value && !gulagUsed.has(data.id) && !gulagInProgress.value) {
                 if (Math.random() < GULAG_CONFIG.chance) {
                     gulagUsed.add(data.id);
-                    const spawnIndex = Math.floor(Math.random() * 8);
-                    const gulagEvent: GulagEvent = { playerId: data.id, spawnIndex };
+                    const gulagEvent: GulagEvent = { deadPlayerId: data.id, killerPlayerId: data.killerId };
                     network?.sendGulag(gulagEvent);
                     handleGulagEvent(gulagEvent);
                 } else {
                     checkWinCondition();
                 }
-            } else {
+            } else if (!gulagInProgress.value) {
                 checkWinCondition();
             }
         },
@@ -373,6 +436,9 @@ async function joinChannel(code: string) {
         },
         onGulag(event: GulagEvent) {
             handleGulagEvent(event);
+        },
+        onGulagResult(event: GulagResultEvent) {
+            handleGulagResult(event);
         },
         onRequestState(data) {
             // Only the admin responds with the current game state
@@ -495,18 +561,20 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
         onDeath(data) {
             alive.value = false;
             network?.sendDeath(data);
-            // Admin rolls gulag for local death too
-            if (isAdmin.value && !gulagUsed.has(data.id)) {
+            if (gulagInProgress.value && isAdmin.value) {
+                const result: GulagResultEvent = { winnerId: data.killerId, loserId: data.id };
+                network?.sendGulagResult(result);
+                handleGulagResult(result);
+            } else if (isAdmin.value && !gulagUsed.has(data.id) && !gulagInProgress.value) {
                 if (Math.random() < GULAG_CONFIG.chance) {
                     gulagUsed.add(data.id);
-                    const spawnIndex = Math.floor(Math.random() * 8);
-                    const gulagEvent: GulagEvent = { playerId: data.id, spawnIndex };
+                    const gulagEvent: GulagEvent = { deadPlayerId: data.id, killerPlayerId: data.killerId };
                     network?.sendGulag(gulagEvent);
                     handleGulagEvent(gulagEvent);
                 } else {
                     checkWinCondition();
                 }
-            } else {
+            } else if (!gulagInProgress.value) {
                 checkWinCondition();
             }
         },
@@ -547,6 +615,13 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
 
     engine.init();
     engine.spawnLocal(spawnAssignments[localId.value] ?? 0);
+
+    // Restore position if reconnecting
+    if (countdownSec === 0 && props.activeSession) {
+        const s = props.activeSession;
+        engine.setLocalPosition(s.x, s.z, s.body_rotation, s.hp);
+        myHp.value = s.hp;
+    }
 
     // Add remote tanks
     for (const p of players) {
@@ -639,34 +714,66 @@ function selectMap(map: MapName) {
 
 // ─── Gulag System ───────────────────────────────────────────────
 async function handleGulagEvent(event: GulagEvent) {
-    const player = players.find(p => p.id === event.playerId);
-    const playerName = player?.name || 'Unknown';
+    const deadPlayer = players.find(p => p.id === event.deadPlayerId);
+    const killerPlayer = players.find(p => p.id === event.killerPlayerId);
+    const deadName = deadPlayer?.name || 'Unknown';
+    const killerName = killerPlayer?.name || 'Unknown';
+
+    gulagInProgress.value = true;
 
     // Show in kill feed
-    killFeed.push({ killer: 'GULAG', target: `${playerName} gets a second chance!`, time: Date.now() });
+    killFeed.push({ killer: 'GULAG', target: `${deadName} vs ${killerName}!`, time: Date.now() });
     if (killFeed.length > 5) killFeed.shift();
 
-    if (event.playerId === localId.value) {
-        // Local player got gulag
-        gulagActive.value = true;
-        gulagCountdown.value = 3;
+    const isLocal = event.deadPlayerId === localId.value || event.killerPlayerId === localId.value;
 
-        for (let i = 3; i > 0; i--) {
+    if (isLocal) {
+        gulagActive.value = true;
+        gulagOpponent.value = event.deadPlayerId === localId.value ? killerName : deadName;
+        gulagCountdown.value = GULAG_CONFIG.countdownSec;
+
+        for (let i = GULAG_CONFIG.countdownSec; i > 0; i--) {
             gulagCountdown.value = i;
             await sleep(1000);
         }
-
         gulagCountdown.value = 0;
-        engine?.respawnFromGulag(event.playerId, event.spawnIndex);
-        alive.value = true;
-        myHp.value = GULAG_CONFIG.respawnHp;
-        gulagActive.value = false;
-        // Don't check win condition — we just respawned
     } else {
-        // Remote player got gulag — respawn after delay
-        await sleep(GULAG_CONFIG.respawnDelay);
-        engine?.respawnFromGulag(event.playerId, event.spawnIndex);
+        // Spectator perspective — just wait the countdown
+        await sleep(GULAG_CONFIG.countdownSec * 1000);
     }
+
+    // Respawn both fighters at opposite ends with gulag HP
+    engine?.respawnFromGulag(event.deadPlayerId, 0);
+    engine?.respawnFromGulag(event.killerPlayerId, 3);
+
+    if (isLocal) {
+        alive.value = true;
+        myHp.value = GULAG_CONFIG.hp;
+    }
+}
+
+function handleGulagResult(event: GulagResultEvent) {
+    gulagInProgress.value = false;
+    gulagActive.value = false;
+    gulagOpponent.value = '';
+
+    const winnerPlayer = players.find(p => p.id === event.winnerId);
+    const loserPlayer = players.find(p => p.id === event.loserId);
+
+    killFeed.push({ killer: 'GULAG', target: `${winnerPlayer?.name || 'Unknown'} wins! ${loserPlayer?.name || 'Unknown'} is eliminated.`, time: Date.now() });
+    if (killFeed.length > 5) killFeed.shift();
+
+    // The loser stays dead — only winner continues with 25% HP
+    if (event.winnerId === localId.value) {
+        alive.value = true;
+        myHp.value = GULAG_CONFIG.hp;
+    }
+    if (event.loserId === localId.value) {
+        alive.value = false;
+    }
+
+    // Now check win condition
+    checkWinCondition();
 }
 
 function resetGame() {
@@ -683,10 +790,14 @@ function resetGame() {
     gulagActive.value = false;
     gulagCountdown.value = 0;
     gulagUsed.clear();
+    gulagOpponent.value = '';
+    gulagInProgress.value = false;
     spectating.value = false;
     reconnecting.value = false;
     currentSpawnAssignments = {};
     if (effectTickInterval) { clearInterval(effectTickInterval); effectTickInterval = null; }
+    if (disconnectInterval) { clearInterval(disconnectInterval); disconnectInterval = null; }
+    disconnectTimer.value = 0;
     // Reset ready state for all players
     players.forEach(p => p.ready = false);
     // Clear reconnection data
@@ -697,6 +808,37 @@ function resetGame() {
 function adminRestart() {
     network?.sendRestart();
     resetGame();
+}
+
+function leaveGame() {
+    clearSessionStorage();
+    if (isAdmin.value && roomCode.value) {
+        apiPost('/api/game/room/unregister', { room_code: roomCode.value });
+    }
+    engine?.destroy();
+    engine = null;
+    network?.leave();
+    network = null;
+    echo = null;
+    phase.value = 'lobby';
+    roomCode.value = '';
+    players.splice(0, players.length);
+    localId.value = '';
+    isAdmin.value = false;
+    alive.value = true;
+    myHp.value = DEFAULT_CONFIG.maxHp;
+    winner.value = '';
+    winnerId.value = '';
+    killFeed.splice(0, killFeed.length);
+    activeEffects.splice(0, activeEffects.length);
+    gulagActive.value = false;
+    gulagInProgress.value = false;
+    spectating.value = false;
+    reconnecting.value = false;
+    if (effectTickInterval) { clearInterval(effectTickInterval); effectTickInterval = null; }
+    if (disconnectInterval) { clearInterval(disconnectInterval); disconnectInterval = null; }
+    disconnectTimer.value = 0;
+    history.replaceState(null, '', '/');
 }
 
 // ─── Lifecycle ───────────────────────────────────────────────────
@@ -808,7 +950,7 @@ function copyRoomCode() {
 }
 
 function copyJoinLink() {
-    const url = `${window.location.origin}/game?code=${roomCode.value}`;
+    const url = `${window.location.origin}/?code=${roomCode.value}`;
     navigator.clipboard.writeText(url);
 }
 
@@ -1248,6 +1390,15 @@ function toggleReady() {
             </div>
         </div>
 
+        <!-- Disconnect grace period banner -->
+        <div v-if="disconnectTimer > 0" class="absolute top-14 left-1/2 -translate-x-1/2 pointer-events-none">
+            <div class="px-4 py-2 bg-yellow-500/20 border border-yellow-500/40 rounded-lg text-center">
+                <p class="text-yellow-400 font-mono text-sm">Opponent disconnected</p>
+                <p class="text-white font-mono text-lg font-bold">{{ disconnectTimer }}s</p>
+                <p class="text-yellow-500/70 font-mono text-xs">to rejoin</p>
+            </div>
+        </div>
+
         <!-- Kill feed -->
         <div class="absolute top-16 right-4 space-y-1 pointer-events-none">
             <div
@@ -1284,8 +1435,9 @@ function toggleReady() {
                 </template>
                 <template v-else-if="gulagActive">
                     <p class="text-5xl font-black text-yellow-400 font-mono animate-pulse">GULAG!</p>
-                    <p class="text-8xl font-black text-white font-mono mt-4">{{ gulagCountdown }}</p>
-                    <p class="text-gray-400 font-mono mt-2">Respawning...</p>
+                    <p v-if="gulagCountdown > 0" class="text-8xl font-black text-white font-mono mt-4">{{ gulagCountdown }}</p>
+                    <p class="text-gray-300 font-mono mt-2 text-lg">vs <span class="text-red-400 font-bold">{{ gulagOpponent }}</span></p>
+                    <p v-if="gulagCountdown === 0" class="text-emerald-400 font-mono mt-2 text-sm">FIGHT!</p>
                 </template>
                 <template v-else>
                     <p class="text-4xl font-black text-red-500 font-mono">ELIMINATED</p>
@@ -1294,13 +1446,19 @@ function toggleReady() {
             </div>
         </div>
 
-        <!-- Controls hint -->
-        <div class="absolute bottom-4 left-4 pointer-events-none">
-            <div class="text-gray-600 font-mono text-xs space-y-0.5">
-                <p>W/A/S/D — Move up/left/down/right</p>
-                <p>Mouse — Aim turret</p>
+        <!-- Controls hint + Leave button -->
+        <div class="absolute bottom-4 left-4 flex items-end gap-4">
+            <div class="text-gray-600 font-mono text-xs space-y-0.5 pointer-events-none">
+                <p>W/A/S/D — Move</p>
+                <p>Mouse — Aim</p>
                 <p>Click — Fire</p>
             </div>
+            <button
+                @click="leaveGame"
+                class="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/40 border border-red-500/30 text-red-400 text-xs font-mono rounded transition-colors"
+            >
+                LEAVE
+            </button>
         </div>
     </div>
 
