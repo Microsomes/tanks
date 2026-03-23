@@ -862,13 +862,6 @@ export class GameEngine {
             const proj = this.projectiles[i];
             if (!proj.alive) continue;
 
-            // Grace period for self-shots (longer for big_shot projectiles)
-            if (proj.shooterId === this.localId) {
-                const spawnTime = this.projectileSpawnTimes.get(proj.id);
-                const grace = proj.damage > 1 ? 0.8 : this.selfHitGracePeriod;
-                if (spawnTime && now - spawnTime < grace) continue;
-            }
-
             // Check hits on remote tanks — remove projectile on contact (they handle their own HP)
             let hitRemote = false;
             for (const [id, remote] of this.remoteTanks) {
@@ -878,10 +871,18 @@ export class GameEngine {
                     this.projectileSpawnTimes.delete(proj.id);
                     this.projectiles.splice(i, 1);
                     hitRemote = true;
+                    this.audio.play('hit', 0.3); // audio feedback on hitting someone
                     break;
                 }
             }
             if (hitRemote) continue;
+
+            // Grace period for self-shots only (skip local hit check)
+            if (proj.shooterId === this.localId) {
+                const spawnTime = this.projectileSpawnTimes.get(proj.id);
+                const grace = proj.damage > 1 ? 0.8 : this.selfHitGracePeriod;
+                if (spawnTime && now - spawnTime < grace) continue;
+            }
 
             if (checkTankHit(proj, this.localX, this.localZ, this.localId)) {
                 // Shield absorbs the hit
