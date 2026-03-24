@@ -50,6 +50,7 @@ interface RemoteTank {
     alive: boolean;
     info: PlayerInfo;
     spawnAnim: number; // 0 to 1, animated
+    lastStateTime: number; // timestamp of last state update
 }
 
 export interface GameEngineCallbacks {
@@ -66,6 +67,7 @@ export interface GameEngineCallbacks {
     onRainBullets: (event: RainBulletsEvent) => void;
     onFreeze: (data: { activatorId: string }) => void;
     onGulag: (event: GulagEvent) => void;
+    onStaleTank: (id: string) => void;
     onWallRotation: (data: { mapName: string }) => void;
     onWallRotationWarning: (data: { mapName: string }) => void;
     onArenaShrink: (data: { phase: string; targetScale: number }) => void;
@@ -288,6 +290,7 @@ export class GameEngine {
             alive: true,
             info,
             spawnAnim: 0,
+            lastStateTime: performance.now(),
         });
         updateHpBar(mesh.hpBar, hp);
     }
@@ -321,6 +324,7 @@ export class GameEngine {
         remote.targetTurretRot = state.turretRotation;
         remote.hp = state.hp;
         remote.alive = state.alive;
+        remote.lastStateTime = performance.now();
         updateHpBar(remote.mesh.hpBar, state.hp);
 
         if (!state.alive) {
@@ -993,6 +997,17 @@ export class GameEngine {
             }
             this.updateArenaShrink(dt);
             this.checkShrinkDamage(dt);
+        }
+
+        // Remove ghost tanks (no state update for 10s)
+        const staleThreshold = 10000;
+        const nowMs = performance.now();
+        for (const [id, remote] of this.remoteTanks) {
+            if (nowMs - remote.lastStateTime > staleThreshold) {
+                this.removeRemoteTank(id);
+                this.callbacks.onStaleTank(id);
+                break; // modified map, restart iteration next frame
+            }
         }
 
         // Rain bullets

@@ -258,6 +258,7 @@ async function joinDeathmatch() {
         onEffectsChange(effects) { activeEffects.splice(0, activeEffects.length, ...effects); },
         onRainBullets(event: RainBulletsEvent) { network?.sendRainBullets(event); },
         onGulag() {},
+        onStaleTank(id) { handleStaleTank(id); },
         onFreeze(data) { network?.sendFreeze(data); },
         onWallRotation(data) { network?.sendWallRotation(data); },
         onWallRotationWarning(data) {
@@ -365,6 +366,7 @@ async function spectateRoom(code: string, mapName: string) {
         onEffectsChange() {},
         onRainBullets() {},
         onGulag() {},
+        onStaleTank(id) { handleStaleTank(id); },
         onFreeze() {},
         onWallRotation() {},
         onWallRotationWarning() {},
@@ -844,6 +846,7 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
         onGulag(event: GulagEvent) {
             network?.sendGulag(event);
         },
+        onStaleTank(id) { handleStaleTank(id); },
         onFreeze(data) {
             network?.sendFreeze(data);
         },
@@ -961,6 +964,19 @@ function checkWinCondition() {
             reportGameEnd(wName, wId);
             refreshLeaderboard();
         }
+    }
+}
+
+// ─── Ghost Tank Cleanup ─────────────────────────────────────────
+function handleStaleTank(id: string) {
+    const player = players.find(p => p.id === id);
+    const name = player?.name || 'Unknown';
+    killFeed.push({ killer: 'SYSTEM', target: `${name} timed out`, time: Date.now() });
+    if (killFeed.length > 5) killFeed.shift();
+    const idx = players.findIndex(p => p.id === id);
+    if (idx >= 0) players.splice(idx, 1);
+    if (gameMode.value === 'deathmatch') {
+        delete dmTotalKills[id];
     }
 }
 
