@@ -10,8 +10,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
+  build-and-deploy:
     runs-on: ubuntu-latest
+    environment: staging
     steps:
       - uses: actions/checkout@v6
 
@@ -36,17 +37,22 @@ jobs:
           cp .env.example .env
           php artisan key:generate
 
-      - name: Build assets
+      - name: Build frontend
         run: npm run build
 
       - name: Run tests
         run: ./vendor/bin/phpunit
 
-  deploy:
-    runs-on: ubuntu-latest
-    needs: test
-    environment: staging
-    steps:
+      - name: Upload built assets to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.STAGING_SERVER_IP }}
+          username: ${{ secrets.STAGING_DEPLOY_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          source: "public/build/"
+          target: "/var/www/laravel/"
+          overwrite: true
+
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
         with:
@@ -68,12 +74,6 @@ jobs:
 
             echo ">>> Installing PHP dependencies"
             composer install --no-dev --optimize-autoloader --no-interaction
-
-            echo ">>> Installing Node dependencies"
-            npm ci
-
-            echo ">>> Building frontend"
-            npm run build
 
             echo ">>> Running migrations"
             php artisan migrate --force
