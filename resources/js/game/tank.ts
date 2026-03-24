@@ -144,7 +144,40 @@ function createNameSprite(name: string, color: string): THREE.Sprite {
     });
     const sprite = new THREE.Sprite(mat);
     sprite.scale.set(3, 0.75, 1);
+    sprite.userData.name = name;
     return sprite;
+}
+
+export function recolorTankMesh(tankMesh: TankMesh, newColor: string) {
+    const colorHex = new THREE.Color(newColor);
+
+    // Body
+    (tankMesh.body.material as THREE.MeshLambertMaterial).color.copy(colorHex);
+
+    // Turret base (first mesh child of turret group)
+    tankMesh.turret.children.forEach(child => {
+        if (child instanceof THREE.Mesh && child !== tankMesh.barrel) {
+            (child.material as THREE.MeshLambertMaterial).color.copy(colorHex.clone().multiplyScalar(0.8));
+        }
+    });
+
+    // Name sprite — redraw with new color
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d')!;
+    const name = tankMesh.nameSprite.userData.name || '';
+    ctx.font = 'bold 28px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 4;
+    ctx.strokeText(name.substring(0, 12), 128, 32);
+    ctx.fillStyle = newColor;
+    ctx.fillText(name.substring(0, 12), 128, 32);
+    const oldTexture = (tankMesh.nameSprite.material as THREE.SpriteMaterial).map;
+    oldTexture?.dispose();
+    (tankMesh.nameSprite.material as THREE.SpriteMaterial).map = new THREE.CanvasTexture(canvas);
 }
 
 export function getBarrelTip(tankGroup: THREE.Group, turret: THREE.Group, bodyRotation: number): THREE.Vector3 {

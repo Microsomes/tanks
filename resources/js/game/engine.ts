@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { createArena, createLighting, createCamera, getSpawnPoints } from './arena';
 import type { MapName } from './arena';
-import { createTankMesh, updateHpBar, getBarrelTip } from './tank';
+import { createTankMesh, updateHpBar, getBarrelTip, recolorTankMesh } from './tank';
 import {
     createProjectile,
     updateProjectile,
@@ -491,6 +491,7 @@ export class GameEngine {
         const spawnIndex = Math.floor(Math.random() * spawns.length);
         const spawn = spawns[spawnIndex];
         const hp = this.config.maxHp;
+        const newColor = TANK_COLORS[Math.floor(Math.random() * TANK_COLORS.length)];
 
         if (playerId === this.localId) {
             this.localAlive = true;
@@ -504,6 +505,8 @@ export class GameEngine {
             updateHpBar(this.localTank.hpBar, this.localHp);
             this.callbacks.onHpChange(this.localHp);
             this.respawnGrace = DEATHMATCH_CONFIG.respawnGrace;
+            recolorTankMesh(this.localTank, newColor);
+            this.localInfo.color = newColor;
 
             // Spawn-in animation
             this.localTank.group.scale.set(0.01, 0.01, 0.01);
@@ -521,6 +524,8 @@ export class GameEngine {
                 remote.mesh.group.rotation.y = spawn.rotation;
                 remote.mesh.group.visible = true;
                 updateHpBar(remote.mesh.hpBar, hp);
+                recolorTankMesh(remote.mesh, newColor);
+                remote.info.color = newColor;
 
                 // Spawn-in animation
                 remote.mesh.group.scale.set(0.01, 0.01, 0.01);
@@ -925,7 +930,8 @@ export class GameEngine {
                     this.projectileSpawnTimes.delete(proj.id);
                     this.projectiles.splice(i, 1);
                     hitRemote = true;
-                    this.audio.play('hit', 0.3); // audio feedback on hitting someone
+                    this.audio.play('hit', 0.3);
+                    this.shakeCamera(0.15); // feedback shake when landing a hit
                     break;
                 }
             }
