@@ -29,6 +29,10 @@ export interface NetworkCallbacks {
     onRematchRequest: (data: { id: string; name: string }) => void;
     onFreeze: (data: { activatorId: string }) => void;
     onDeathmatchRespawn: (data: { id: string }) => void;
+    onWallRotation: (data: { mapName: string }) => void;
+    onWallRotationWarning: (data: { mapName: string }) => void;
+    onArenaShrink: (data: { phase: string; targetScale: number }) => void;
+    onArenaShrinkWarning: () => void;
 }
 
 /**
@@ -176,6 +180,18 @@ export class GameNetwork {
                 })
                 .listenForWhisper('deathmatch-respawn', (data: { id: string }) => {
                     this.callbacks.onDeathmatchRespawn(data);
+                })
+                .listenForWhisper('wall-rotation', (data: { mapName: string }) => {
+                    this.callbacks.onWallRotation(data);
+                })
+                .listenForWhisper('wall-rotation-warning', (data: { mapName: string }) => {
+                    this.callbacks.onWallRotationWarning(data);
+                })
+                .listenForWhisper('arena-shrink', (data: { phase: string; targetScale: number }) => {
+                    this.callbacks.onArenaShrink(data);
+                })
+                .listenForWhisper('arena-shrink-warning', () => {
+                    this.callbacks.onArenaShrinkWarning();
                 });
         });
     }
@@ -274,6 +290,22 @@ export class GameNetwork {
 
     sendDeathmatchRespawn(data: { id: string }) {
         this.channel?.whisper('deathmatch-respawn', data);
+    }
+
+    sendWallRotation(data: { mapName: string }) {
+        this.channel?.whisper('wall-rotation', data);
+    }
+
+    sendWallRotationWarning(data: { mapName: string }) {
+        this.channel?.whisper('wall-rotation-warning', data);
+    }
+
+    sendArenaShrink(data: { phase: string; targetScale: number }) {
+        this.channel?.whisper('arena-shrink', data);
+    }
+
+    sendArenaShrinkWarning() {
+        this.channel?.whisper('arena-shrink-warning', {});
     }
 
     leave() {

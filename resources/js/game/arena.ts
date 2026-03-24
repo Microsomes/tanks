@@ -4,7 +4,18 @@ import type { GameConfig, Wall } from './types';
 export type MapName = 'classic' | 'corridors' | 'bunkers' | 'open' | 'maze';
 export const MAP_NAMES: MapName[] = ['classic', 'corridors', 'bunkers', 'open', 'maze'];
 
-export function createArena(scene: THREE.Scene, config: GameConfig, mapName: MapName = 'classic'): Wall[] {
+export interface WallObject {
+    data: Wall;
+    mesh: THREE.Mesh;
+}
+
+export interface ArenaResult {
+    boundaryWalls: WallObject[];
+    interiorWalls: WallObject[];
+    allWallData: Wall[];
+}
+
+export function createArena(scene: THREE.Scene, config: GameConfig, mapName: MapName = 'classic'): ArenaResult {
     const { arenaWidth: W, arenaHeight: H } = config;
     const halfW = W / 2;
     const halfH = H / 2;
@@ -24,26 +35,60 @@ export function createArena(scene: THREE.Scene, config: GameConfig, mapName: Map
     gridHelper.position.y = 0.01;
     scene.add(gridHelper);
 
-    const wallMat = new THREE.MeshLambertMaterial({ color: 0x5a5a8a, flatShading: true });
-    const walls: Wall[] = [];
+    // Boundary walls
+    const boundaryWalls = buildBoundaryWalls(scene, halfW, halfH, wallThickness, wallHeight);
 
-    function addWall(x: number, z: number, w: number, d: number, h: number = wallHeight) {
+    // Interior walls
+    const interiorWalls = buildInteriorWallObjects(scene, config, mapName);
+
+    const allWallData = [
+        ...boundaryWalls.map(w => w.data),
+        ...interiorWalls.map(w => w.data),
+    ];
+
+    return { boundaryWalls, interiorWalls, allWallData };
+}
+
+function buildBoundaryWalls(scene: THREE.Scene, halfW: number, halfH: number, thickness: number, height: number): WallObject[] {
+    const mat = new THREE.MeshLambertMaterial({ color: 0x5a5a8a, flatShading: true });
+    const walls: WallObject[] = [];
+
+    function add(x: number, z: number, w: number, d: number, h: number) {
         const geo = new THREE.BoxGeometry(w, h, d);
-        const mesh = new THREE.Mesh(geo, wallMat);
+        const mesh = new THREE.Mesh(geo, mat);
         mesh.position.set(x, h / 2, z);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         scene.add(mesh);
-        walls.push({ x, z, width: w, depth: d, height: h });
+        walls.push({ data: { x, z, width: w, depth: d, height: h }, mesh });
     }
 
-    // Outer walls
-    addWall(0, -halfH - wallThickness / 2, W + wallThickness * 2, wallThickness, wallHeight); // top
-    addWall(0, halfH + wallThickness / 2, W + wallThickness * 2, wallThickness, wallHeight);  // bottom
-    addWall(-halfW - wallThickness / 2, 0, wallThickness, H, wallHeight); // left
-    addWall(halfW + wallThickness / 2, 0, wallThickness, H, wallHeight);  // right
+    const W = halfW * 2;
+    const H = halfH * 2;
+    add(0, -halfH - thickness / 2, W + thickness * 2, thickness, height); // top
+    add(0, halfH + thickness / 2, W + thickness * 2, thickness, height);  // bottom
+    add(-halfW - thickness / 2, 0, thickness, H, height); // left
+    add(halfW + thickness / 2, 0, thickness, H, height);  // right
 
-    // Interior walls — selected by map name
+    return walls;
+}
+
+export function buildInteriorWallObjects(scene: THREE.Scene, config: GameConfig, mapName: MapName): WallObject[] {
+    const { arenaWidth: W, arenaHeight: H } = config;
+    const wallHeight = 2;
+    const mat = new THREE.MeshLambertMaterial({ color: 0x5a5a8a, flatShading: true });
+    const walls: WallObject[] = [];
+
+    function addWall(x: number, z: number, w: number, d: number, h: number = wallHeight) {
+        const geo = new THREE.BoxGeometry(w, h, d);
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(x, h / 2, z);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        scene.add(mesh);
+        walls.push({ data: { x, z, width: w, depth: d, height: h }, mesh });
+    }
+
     switch (mapName) {
         case 'classic':
             buildClassicWalls(addWall, W, H);
@@ -65,13 +110,21 @@ export function createArena(scene: THREE.Scene, config: GameConfig, mapName: Map
     return walls;
 }
 
+export function removeWallObjects(wallObjects: WallObject[], scene: THREE.Scene) {
+    for (const obj of wallObjects) {
+        scene.remove(obj.mesh);
+        obj.mesh.geometry.dispose();
+        (obj.mesh.material as THREE.Material).dispose();
+    }
+    wallObjects.length = 0;
+}
+
 // ─── Map Builders ────────────────────────────────────────────────────
 
 type AddWallFn = (x: number, z: number, w: number, d: number, h?: number) => void;
 
 /**
  * Classic — center cross, corner blocks, side blocks, diagonal blocks.
- * The original layout.
  */
 function buildClassicWalls(addWall: AddWallFn, W: number, H: number) {
     const blockW = 4;
@@ -106,25 +159,20 @@ function buildClassicWalls(addWall: AddWallFn, W: number, H: number) {
 
 /**
  * Corridors — three horizontal lanes with gaps, connected by short vertical walls.
- * Creates intense corridor firefights.
  */
 function buildCorridorWalls(addWall: AddWallFn, W: number, _H: number) {
     const laneZ = [-8, 0, 8];
-    const segmentLength = W * 0.35; // each segment spans ~35% of arena width
-    const gapHalf = 2.5;            // half-width of the center gap
+    const segmentLength = W * 0.35;
+    const gapHalf = 2.5;
     const wallD = 1;
 
-    // Three horizontal lanes, each split into two segments with a center gap
     for (const z of laneZ) {
-        // Left segment: from center-gap to the left
         addWall(-(segmentLength / 2 + gapHalf), z, segmentLength, wallD);
-        // Right segment: from center-gap to the right
         addWall(segmentLength / 2 + gapHalf, z, segmentLength, wallD);
     }
 
-    // Short vertical connecting walls between the lanes at x = ±12
     const connectX = 12;
-    const connectLength = 5; // vertical span between lanes
+    const connectLength = 5;
     addWall(-connectX, -4, wallD, connectLength);
     addWall(connectX, -4, wallD, connectLength);
     addWall(-connectX, 4, wallD, connectLength);
@@ -133,39 +181,32 @@ function buildCorridorWalls(addWall: AddWallFn, W: number, _H: number) {
 
 /**
  * Bunkers — four L-shaped corner bunkers with a small center pillar.
- * Players can hunker in corners or fight in the open middle.
  */
 function buildBunkerWalls(addWall: AddWallFn, W: number, H: number) {
     const wallD = 1;
-    const armLength = 6;   // length of each L arm
-    const insetX = W * 0.25; // how far from center the corner is
+    const armLength = 6;
+    const insetX = W * 0.25;
     const insetZ = H * 0.28;
 
-    // L-shaped bunker in each corner (horizontal arm + vertical arm)
     const corners = [
-        { sx: -1, sz: -1 }, // top-left
-        { sx: 1, sz: -1 },  // top-right
-        { sx: -1, sz: 1 },  // bottom-left
-        { sx: 1, sz: 1 },   // bottom-right
+        { sx: -1, sz: -1 },
+        { sx: 1, sz: -1 },
+        { sx: -1, sz: 1 },
+        { sx: 1, sz: 1 },
     ];
 
     for (const { sx, sz } of corners) {
         const cx = sx * insetX;
         const cz = sz * insetZ;
-
-        // Horizontal arm: extends inward from the corner
         addWall(cx - sx * (armLength / 2), cz, armLength, wallD);
-        // Vertical arm: extends inward from the corner
         addWall(cx, cz - sz * (armLength / 2), wallD, armLength);
     }
 
-    // Small center pillar (2x2 block)
     addWall(0, 0, 2, 2);
 }
 
 /**
  * Open — minimal cover, just 4 small pillars symmetrically placed.
- * High risk, high reward.
  */
 function buildOpenWalls(addWall: AddWallFn) {
     const pillarSize = 1.5;
@@ -180,42 +221,32 @@ function buildOpenWalls(addWall: AddWallFn) {
 
 /**
  * Maze — dense grid of short walls creating winding paths.
- * Many small 3-wide walls placed in a grid pattern with gaps.
  */
 function buildMazeWalls(addWall: AddWallFn, W: number, H: number) {
     const wallD = 1;
-    const segLen = 3; // short wall segments
-
-    // Grid spacing — walls placed at regular intervals
+    const segLen = 3;
     const xSpacing = 6;
     const zSpacing = 5;
-
-    // Number of grid positions in each direction (symmetric around center)
     const xSteps = Math.floor((W * 0.4) / xSpacing);
     const zSteps = Math.floor((H * 0.4) / zSpacing);
 
-    // Build a checkerboard-like pattern of horizontal and vertical short walls
     for (let ix = -xSteps; ix <= xSteps; ix++) {
         for (let iz = -zSteps; iz <= zSteps; iz++) {
             const x = ix * xSpacing;
             const z = iz * zSpacing;
 
-            // Alternate between horizontal and vertical walls in a checkerboard
-            // Skip the very center to leave a small clearing
             if (Math.abs(ix) === 0 && Math.abs(iz) === 0) continue;
 
             if ((ix + iz) % 2 === 0) {
-                // Horizontal wall segment
                 addWall(x, z, segLen, wallD);
             } else {
-                // Vertical wall segment
                 addWall(x, z, wallD, segLen);
             }
         }
     }
 }
 
-// ─── Lighting, Camera, Spawn Points (unchanged) ─────────────────────
+// ─── Lighting, Camera, Spawn Points ─────────────────────────────────
 
 export function createLighting(scene: THREE.Scene) {
     const ambient = new THREE.AmbientLight(0x6060a0, 0.6);

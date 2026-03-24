@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { createArena, createLighting, createCamera, getSpawnPoints } from './arena';
-import type { MapName } from './arena';
+import { createArena, createLighting, createCamera, getSpawnPoints, buildInteriorWallObjects, removeWallObjects, MAP_NAMES } from './arena';
+import type { MapName, WallObject } from './arena';
 import { createTankMesh, updateHpBar, getBarrelTip, recolorTankMesh } from './tank';
 import {
     createProjectile,
@@ -37,7 +37,7 @@ import type {
     ActiveEffect,
     RainBulletsEvent,
 } from './types';
-import { DEFAULT_CONFIG, TANK_COLORS, POWERUP_CONFIG, GULAG_CONFIG, DEATHMATCH_CONFIG } from './types';
+import { DEFAULT_CONFIG, TANK_COLORS, POWERUP_CONFIG, GULAG_CONFIG, DEATHMATCH_CONFIG, DEATHMATCH_ARENA_CONFIG } from './types';
 import type { GameMode, GulagEvent, GulagResultEvent } from './types';
 
 interface RemoteTank {
@@ -66,6 +66,10 @@ export interface GameEngineCallbacks {
     onRainBullets: (event: RainBulletsEvent) => void;
     onFreeze: (data: { activatorId: string }) => void;
     onGulag: (event: GulagEvent) => void;
+    onWallRotation: (data: { mapName: string }) => void;
+    onWallRotationWarning: (data: { mapName: string }) => void;
+    onArenaShrink: (data: { phase: string; targetScale: number }) => void;
+    onArenaShrinkWarning: () => void;
 }
 
 export class GameEngine {
@@ -73,6 +77,8 @@ export class GameEngine {
     private scene!: THREE.Scene;
     private camera!: THREE.PerspectiveCamera;
     private walls: Wall[] = [];
+    private boundaryWalls: WallObject[] = [];
+    private interiorWalls: WallObject[] = [];
     private config: GameConfig;
     private input!: ReturnType<typeof createInputHandler>;
 
@@ -147,6 +153,20 @@ export class GameEngine {
     // Game mode
     private gameMode: GameMode = 'classic';
 
+    // Wall rotation (deathmatch)
+    private wallRotationTimer = 0;
+    private wallRotationWarned = false;
+
+    // Arena shrink (deathmatch)
+    private arenaShrinkTimer = 0;
+    private arenaShrinkPhase: 'idle' | 'warning' | 'shrinking' | 'holding' | 'expanding' = 'idle';
+    private arenaShrinkScale = 1.0;
+    private arenaShrinkTarget = 1.0;
+    private arenaShrinkHoldTimer = 0;
+    private arenaShrinkDamageTick = 0;
+    private shrinkZoneMeshes: THREE.Mesh[] = [];
+    private nextShrinkDelay = 0;
+
     constructor(
         private canvas: HTMLCanvasElement,
         localId: string,
@@ -191,7 +211,10 @@ export class GameEngine {
             createLighting(this.scene);
 
             // Arena
-            this.walls = createArena(this.scene, this.config, this.mapName);
+            const arena = createArena(this.scene, this.config, this.mapName);
+            this.boundaryWalls = arena.boundaryWalls;
+            this.interiorWalls = arena.interiorWalls;
+            this.walls = arena.allWallData;
 
             // Local tank
             this.localTank = createTankMesh(this.localInfo.color, this.localInfo.name);
@@ -440,6 +463,329 @@ export class GameEngine {
         }, 5000);
     }
 
+    // ─── Wall Data Rebuild ──────────────────────────────────────────
+
+    private rebuildWallData() {
+        this.walls = [
+            ...this.boundaryWalls.map(w => w.data),
+            ...this.interiorWalls.map(w => w.data),
+        ];
+    }
+
+    // ─── Wall Rotation (Deathmatch) ─────────────────────────────────
+
+    executeWallRotation(mapName: MapName) {
+        // Remove old interior walls
+        removeWallObjects(this.interiorWalls, this.scene);
+
+        // Build new interior walls
+        this.interiorWalls = buildInteriorWallObjects(this.scene, this.config, mapName);
+        this.mapName = mapName;
+        this.rebuildWallData();
+
+        // Push tanks out of new walls
+        const pushed = this.pushOutOfWalls(this.localX, this.localZ, 1.2);
+        if (pushed.x !== this.localX || pushed.z !== this.localZ) {
+            this.localX = pushed.x;
+            this.localZ = pushed.z;
+            this.localTank.group.position.set(this.localX, 0, this.localZ);
+        }
+        for (const [, remote] of this.remoteTanks) {
+            if (!remote.alive) continue;
+            const rp = this.pushOutOfWalls(remote.mesh.group.position.x, remote.mesh.group.position.z, 1.2);
+            remote.targetX = rp.x;
+            remote.targetZ = rp.z;
+            remote.mesh.group.position.set(rp.x, 0, rp.z);
+        }
+
+        // Kill all active projectiles
+        for (const proj of this.projectiles) {
+            removeProjectile(proj, this.scene);
+            this.projectileSpawnTimes.delete(proj.id);
+        }
+        this.projectiles = [];
+
+        // Remove powerups inside new walls
+        for (let i = this.powerups.length - 1; i >= 0; i--) {
+            const p = this.powerups[i];
+            if (this.checkWallCollision(p.x, p.z, 0.5)) {
+                removePowerup(p, this.scene);
+                this.powerups.splice(i, 1);
+            }
+        }
+
+        this.shakeCamera(0.5);
+    }
+
+    private pushOutOfWalls(x: number, z: number, radius: number): { x: number; z: number } {
+        if (!this.checkWallCollision(x, z, radius)) return { x, z };
+
+        const dirs = [
+            { dx: 1, dz: 0 }, { dx: -1, dz: 0 },
+            { dx: 0, dz: 1 }, { dx: 0, dz: -1 },
+            { dx: 0.707, dz: 0.707 }, { dx: -0.707, dz: 0.707 },
+            { dx: 0.707, dz: -0.707 }, { dx: -0.707, dz: -0.707 },
+        ];
+        for (let dist = 0.5; dist <= 6; dist += 0.5) {
+            for (const dir of dirs) {
+                const nx = x + dir.dx * dist;
+                const nz = z + dir.dz * dist;
+                if (!this.checkWallCollision(nx, nz, radius)) {
+                    return { x: nx, z: nz };
+                }
+            }
+        }
+        return { x: 0, z: 0 };
+    }
+
+    private adminWallRotation(dt: number) {
+        this.wallRotationTimer += dt;
+        const cfg = DEATHMATCH_ARENA_CONFIG;
+
+        if (!this.wallRotationWarned && this.wallRotationTimer >= cfg.wallRotationIntervalSec - cfg.wallRotationWarningSec) {
+            this.wallRotationWarned = true;
+            const available = MAP_NAMES.filter(m => m !== this.mapName);
+            const nextMap = available[Math.floor(Math.random() * available.length)];
+            this.callbacks.onWallRotationWarning({ mapName: nextMap });
+        }
+
+        if (this.wallRotationTimer >= cfg.wallRotationIntervalSec) {
+            this.wallRotationTimer = 0;
+            this.wallRotationWarned = false;
+            // The warning callback already told Game.vue which map — it stores it and broadcasts.
+            // The actual rotation is triggered from Game.vue after warning timeout.
+        }
+    }
+
+    // ─── Arena Shrink (Deathmatch) ───────────────────────────────────
+
+    setArenaShrinkPhase(phase: string, targetScale: number) {
+        this.arenaShrinkTarget = targetScale;
+        if (phase === 'shrinking') {
+            this.arenaShrinkPhase = 'shrinking';
+        } else if (phase === 'expanding') {
+            this.arenaShrinkPhase = 'expanding';
+        }
+    }
+
+    private adminArenaShrink(dt: number) {
+        const cfg = DEATHMATCH_ARENA_CONFIG;
+
+        switch (this.arenaShrinkPhase) {
+            case 'idle':
+                this.arenaShrinkTimer += dt;
+                if (this.nextShrinkDelay === 0) {
+                    this.nextShrinkDelay = cfg.arenaShrinkIntervalMinSec +
+                        Math.random() * (cfg.arenaShrinkIntervalMaxSec - cfg.arenaShrinkIntervalMinSec);
+                }
+                if (this.arenaShrinkTimer >= this.nextShrinkDelay - cfg.arenaShrinkWarningSec && this.arenaShrinkPhase === 'idle') {
+                    this.arenaShrinkPhase = 'warning';
+                    this.arenaShrinkTimer = 0;
+                    this.callbacks.onArenaShrinkWarning();
+                }
+                break;
+
+            case 'warning':
+                this.arenaShrinkTimer += dt;
+                if (this.arenaShrinkTimer >= cfg.arenaShrinkWarningSec) {
+                    this.arenaShrinkPhase = 'shrinking';
+                    this.arenaShrinkTarget = cfg.arenaShrinkTargetScale;
+                    this.arenaShrinkTimer = 0;
+                    this.callbacks.onArenaShrink({ phase: 'shrinking', targetScale: cfg.arenaShrinkTargetScale });
+                }
+                break;
+
+            case 'shrinking':
+                // Animated in updateArenaShrink
+                break;
+
+            case 'holding':
+                this.arenaShrinkHoldTimer += dt;
+                if (this.arenaShrinkHoldTimer >= cfg.arenaShrinkHoldSec) {
+                    this.arenaShrinkPhase = 'expanding';
+                    this.arenaShrinkTarget = 1.0;
+                    this.arenaShrinkHoldTimer = 0;
+                    this.callbacks.onArenaShrink({ phase: 'expanding', targetScale: 1.0 });
+                }
+                break;
+
+            case 'expanding':
+                // Animated in updateArenaShrink
+                break;
+        }
+    }
+
+    private updateArenaShrink(dt: number) {
+        if (this.arenaShrinkPhase !== 'shrinking' && this.arenaShrinkPhase !== 'expanding') return;
+
+        const speed = DEATHMATCH_ARENA_CONFIG.arenaShrinkAnimSpeed;
+        if (this.arenaShrinkScale > this.arenaShrinkTarget) {
+            this.arenaShrinkScale = Math.max(this.arenaShrinkTarget, this.arenaShrinkScale - speed * dt);
+        } else if (this.arenaShrinkScale < this.arenaShrinkTarget) {
+            this.arenaShrinkScale = Math.min(this.arenaShrinkTarget, this.arenaShrinkScale + speed * dt);
+        }
+
+        // Update boundary wall positions
+        this.updateBoundaryWalls();
+        this.rebuildWallData();
+
+        // Check if animation done
+        if (Math.abs(this.arenaShrinkScale - this.arenaShrinkTarget) < 0.01) {
+            this.arenaShrinkScale = this.arenaShrinkTarget;
+            this.updateBoundaryWalls();
+            this.rebuildWallData();
+
+            if (this.arenaShrinkPhase === 'shrinking') {
+                this.arenaShrinkPhase = 'holding';
+                this.arenaShrinkHoldTimer = 0;
+                this.createShrinkZoneOverlay();
+            } else if (this.arenaShrinkPhase === 'expanding') {
+                this.arenaShrinkPhase = 'idle';
+                this.arenaShrinkTimer = 0;
+                this.nextShrinkDelay = 0;
+                this.removeShrinkZoneOverlay();
+            }
+        }
+    }
+
+    private updateBoundaryWalls() {
+        const { arenaWidth: W, arenaHeight: H } = this.config;
+        const s = this.arenaShrinkScale;
+        const halfW = (W / 2) * s;
+        const halfH = (H / 2) * s;
+        const t = 1; // thickness
+        const h = 2; // height
+
+        const specs = [
+            { x: 0, z: -halfH - t / 2, w: halfW * 2 + t * 2, d: t },   // top
+            { x: 0, z: halfH + t / 2, w: halfW * 2 + t * 2, d: t },    // bottom
+            { x: -halfW - t / 2, z: 0, w: t, d: halfH * 2 },            // left
+            { x: halfW + t / 2, z: 0, w: t, d: halfH * 2 },             // right
+        ];
+
+        for (let i = 0; i < this.boundaryWalls.length && i < specs.length; i++) {
+            const spec = specs[i];
+            const bw = this.boundaryWalls[i];
+            bw.mesh.position.set(spec.x, h / 2, spec.z);
+            bw.mesh.geometry.dispose();
+            bw.mesh.geometry = new THREE.BoxGeometry(spec.w, h, spec.d);
+            bw.data = { x: spec.x, z: spec.z, width: spec.w, depth: spec.d, height: h };
+        }
+    }
+
+    private createShrinkZoneOverlay() {
+        this.removeShrinkZoneOverlay();
+        const { arenaWidth: W, arenaHeight: H } = this.config;
+        const s = this.arenaShrinkScale;
+        const innerW = W * s;
+        const innerH = H * s;
+
+        // 4 red strips along edges (between full arena and shrunk boundary)
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0xff2200,
+            transparent: true,
+            opacity: 0.12,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+        });
+
+        const stripW = (W - innerW) / 2;
+        const stripH = (H - innerH) / 2;
+
+        if (stripW > 0.1) {
+            // Left strip
+            const lg = new THREE.PlaneGeometry(stripW, H);
+            const lm = new THREE.Mesh(lg, mat);
+            lm.rotation.x = -Math.PI / 2;
+            lm.position.set(-(innerW / 2 + stripW / 2), 0.03, 0);
+            this.scene.add(lm);
+            this.shrinkZoneMeshes.push(lm);
+
+            // Right strip
+            const rg = new THREE.PlaneGeometry(stripW, H);
+            const rm = new THREE.Mesh(rg, mat);
+            rm.rotation.x = -Math.PI / 2;
+            rm.position.set(innerW / 2 + stripW / 2, 0.03, 0);
+            this.scene.add(rm);
+            this.shrinkZoneMeshes.push(rm);
+        }
+
+        if (stripH > 0.1) {
+            // Top strip
+            const tg = new THREE.PlaneGeometry(innerW, stripH);
+            const tm = new THREE.Mesh(tg, mat);
+            tm.rotation.x = -Math.PI / 2;
+            tm.position.set(0, 0.03, -(innerH / 2 + stripH / 2));
+            this.scene.add(tm);
+            this.shrinkZoneMeshes.push(tm);
+
+            // Bottom strip
+            const bg = new THREE.PlaneGeometry(innerW, stripH);
+            const bm = new THREE.Mesh(bg, mat);
+            bm.rotation.x = -Math.PI / 2;
+            bm.position.set(0, 0.03, innerH / 2 + stripH / 2);
+            this.scene.add(bm);
+            this.shrinkZoneMeshes.push(bm);
+        }
+    }
+
+    private removeShrinkZoneOverlay() {
+        for (const m of this.shrinkZoneMeshes) {
+            this.scene.remove(m);
+            m.geometry.dispose();
+            (m.material as THREE.Material).dispose();
+        }
+        this.shrinkZoneMeshes = [];
+    }
+
+    private checkShrinkDamage(dt: number) {
+        if (this.arenaShrinkScale >= 1.0 || !this.localAlive || this.spectateMode) return;
+
+        const halfW = (this.config.arenaWidth / 2 - 1.5) * this.arenaShrinkScale;
+        const halfH = (this.config.arenaHeight / 2 - 1.5) * this.arenaShrinkScale;
+
+        const outside = Math.abs(this.localX) > halfW || Math.abs(this.localZ) > halfH;
+        if (!outside) return;
+
+        // Push toward center
+        const push = 4.0 * dt;
+        if (this.localX > halfW) this.localX -= push;
+        if (this.localX < -halfW) this.localX += push;
+        if (this.localZ > halfH) this.localZ -= push;
+        if (this.localZ < -halfH) this.localZ += push;
+        this.localTank.group.position.set(this.localX, 0, this.localZ);
+
+        // Damage tick
+        this.arenaShrinkDamageTick += dt;
+        if (this.arenaShrinkDamageTick >= DEATHMATCH_ARENA_CONFIG.arenaShrinkDamageTickSec) {
+            this.arenaShrinkDamageTick = 0;
+            if (this.hasEffect('shield')) {
+                this.activeEffects = this.activeEffects.filter(e => e.type !== 'shield');
+                this.callbacks.onEffectsChange([...this.activeEffects]);
+                this.audio.play('shield_break', 0.4);
+            } else {
+                this.localHp = Math.max(0, this.localHp - DEATHMATCH_ARENA_CONFIG.arenaShrinkDamagePerTick);
+                updateHpBar(this.localTank.hpBar, this.localHp);
+                this.callbacks.onHpChange(this.localHp);
+                this.flashTank(this.localTank);
+                this.audio.play('hit', 0.3);
+
+                if (this.localHp <= 0) {
+                    this.localAlive = false;
+                    this.localTank.group.visible = false;
+                    createExplosion(this.scene, this.localX, this.localZ, this.localInfo.color);
+                    this.audio.play('explosion', 0.6);
+                    this.callbacks.onDeath({ id: this.localId, killerId: 'arena' });
+                    this.callbacks.onKill('ARENA', this.localInfo.name);
+                }
+            }
+        }
+    }
+
+    getArenaShrinkScale(): number {
+        return this.arenaShrinkScale;
+    }
+
     // ─── Gulag Respawn ────────────────────────────────────────────
 
     respawnFromGulag(playerId: string, spawnIndex: number) {
@@ -580,6 +926,9 @@ export class GameEngine {
             (this.rainZoneMesh.material as THREE.Material).dispose();
             this.rainZoneMesh = null;
         }
+        removeWallObjects(this.interiorWalls, this.scene);
+        removeWallObjects(this.boundaryWalls, this.scene);
+        this.removeShrinkZoneOverlay();
         window.removeEventListener('resize', this.onResize);
         this.renderer?.dispose();
     }
@@ -635,6 +984,16 @@ export class GameEngine {
         this.despawnOldPowerups();
         if (this.isAdmin) this.adminSpawnPowerups(dt);
         this.updateNewEffects(dt);
+
+        // Deathmatch arena dynamics
+        if (this.gameMode === 'deathmatch') {
+            if (this.isAdmin) {
+                this.adminWallRotation(dt);
+                this.adminArenaShrink(dt);
+            }
+            this.updateArenaShrink(dt);
+            this.checkShrinkDamage(dt);
+        }
 
         // Rain bullets
         if (this.rainBulletsActive) {
@@ -774,9 +1133,9 @@ export class GameEngine {
             this.localZ += dz;
         }
 
-        // Clamp to arena
-        const halfW = this.config.arenaWidth / 2 - 1.5;
-        const halfH = this.config.arenaHeight / 2 - 1.5;
+        // Clamp to arena (respect shrink scale)
+        const halfW = (this.config.arenaWidth / 2 - 1.5) * this.arenaShrinkScale;
+        const halfH = (this.config.arenaHeight / 2 - 1.5) * this.arenaShrinkScale;
         this.localX = Math.max(-halfW, Math.min(halfW, this.localX));
         this.localZ = Math.max(-halfH, Math.min(halfH, this.localZ));
 

@@ -107,8 +107,21 @@ export type GameMode = 'classic' | 'deathmatch';
 
 export const DEATHMATCH_CONFIG = {
     respawnDelaySec: 3,
-    respawnHp: 5, // full HP on respawn
-    respawnGrace: 2, // seconds of invulnerability after respawn
+    respawnHp: 5,
+    respawnGrace: 2,
+} as const;
+
+export const DEATHMATCH_ARENA_CONFIG = {
+    wallRotationIntervalSec: 45,
+    wallRotationWarningSec: 3,
+    arenaShrinkIntervalMinSec: 60,
+    arenaShrinkIntervalMaxSec: 90,
+    arenaShrinkWarningSec: 3,
+    arenaShrinkTargetScale: 0.7,
+    arenaShrinkHoldSec: 15,
+    arenaShrinkAnimSpeed: 0.5,
+    arenaShrinkDamagePerTick: 1,
+    arenaShrinkDamageTickSec: 0.5,
 } as const;
 
 // ─── Powerups ────────────────────────────────────────────────────

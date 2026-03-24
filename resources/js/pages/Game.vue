@@ -56,6 +56,9 @@ const disconnectTimer = ref(0);
 const gameMode = ref<GameMode>('classic');
 const respawnCountdown = ref(0);
 const dmTotalKills = reactive<Record<string, number>>({});
+const wallShiftWarning = ref('');
+const arenaShrinkWarning = ref(false);
+let pendingWallRotationMap = '';
 let disconnectInterval: number | null = null;
 const rematchRequested = ref(false);
 const rematchRequestedBy = reactive<Set<string>>(new Set());
@@ -256,6 +259,27 @@ async function joinDeathmatch() {
         onRainBullets(event: RainBulletsEvent) { network?.sendRainBullets(event); },
         onGulag() {},
         onFreeze(data) { network?.sendFreeze(data); },
+        onWallRotation(data) { network?.sendWallRotation(data); },
+        onWallRotationWarning(data) {
+            // Admin engine fires this — broadcast warning, then execute after 3s
+            network?.sendWallRotationWarning(data);
+            wallShiftWarning.value = data.mapName;
+            pendingWallRotationMap = data.mapName;
+            setTimeout(() => {
+                wallShiftWarning.value = '';
+                if (engine && pendingWallRotationMap) {
+                    engine.executeWallRotation(pendingWallRotationMap as any);
+                    network?.sendWallRotation({ mapName: pendingWallRotationMap });
+                    pendingWallRotationMap = '';
+                }
+            }, 3000);
+        },
+        onArenaShrink(data) { network?.sendArenaShrink(data); },
+        onArenaShrinkWarning() {
+            network?.sendArenaShrinkWarning();
+            arenaShrinkWarning.value = true;
+            setTimeout(() => { arenaShrinkWarning.value = false; }, 3000);
+        },
     }, undefined, 'open', 'deathmatch');
 
     engine.init();
@@ -342,6 +366,10 @@ async function spectateRoom(code: string, mapName: string) {
         onRainBullets() {},
         onGulag() {},
         onFreeze() {},
+        onWallRotation() {},
+        onWallRotationWarning() {},
+        onArenaShrink() {},
+        onArenaShrinkWarning() {},
     }, undefined, mapName as MapName);
 
     engine.init();
@@ -644,6 +672,24 @@ async function joinChannel(code: string) {
         onDeathmatchRespawn(data) {
             engine?.respawnForDeathmatch(data.id);
         },
+        onWallRotation(data) {
+            // Non-admin receives: just execute
+            engine?.executeWallRotation(data.mapName as any);
+        },
+        onWallRotationWarning(data) {
+            // Non-admin receives: show warning, execute after 3s
+            wallShiftWarning.value = data.mapName;
+            setTimeout(() => { wallShiftWarning.value = ''; }, 3000);
+        },
+        onArenaShrink(data) {
+            // Non-admin receives: sync shrink phase
+            engine?.setArenaShrinkPhase(data.phase, data.targetScale);
+        },
+        onArenaShrinkWarning() {
+            // Non-admin receives: show warning
+            arenaShrinkWarning.value = true;
+            setTimeout(() => { arenaShrinkWarning.value = false; }, 3000);
+        },
     });
 
     try {
@@ -800,6 +846,26 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
         },
         onFreeze(data) {
             network?.sendFreeze(data);
+        },
+        onWallRotation(data) { network?.sendWallRotation(data); },
+        onWallRotationWarning(data) {
+            network?.sendWallRotationWarning(data);
+            wallShiftWarning.value = data.mapName;
+            pendingWallRotationMap = data.mapName;
+            setTimeout(() => {
+                wallShiftWarning.value = '';
+                if (engine && pendingWallRotationMap) {
+                    engine.executeWallRotation(pendingWallRotationMap as any);
+                    network?.sendWallRotation({ mapName: pendingWallRotationMap });
+                    pendingWallRotationMap = '';
+                }
+            }, 3000);
+        },
+        onArenaShrink(data) { network?.sendArenaShrink(data); },
+        onArenaShrinkWarning() {
+            network?.sendArenaShrinkWarning();
+            arenaShrinkWarning.value = true;
+            setTimeout(() => { arenaShrinkWarning.value = false; }, 3000);
         },
     }, undefined, mapName, gameMode.value);
 
@@ -1017,6 +1083,9 @@ function resetGame() {
     gulagOpponent.value = '';
     gulagInProgress.value = false;
     spectating.value = false;
+    wallShiftWarning.value = '';
+    arenaShrinkWarning.value = false;
+    pendingWallRotationMap = '';
     Object.keys(gameKills).forEach(k => delete gameKills[k]);
     Object.keys(gameDeaths).forEach(k => delete gameDeaths[k]);
     Object.keys(dmTotalKills).forEach(k => delete dmTotalKills[k]);
@@ -1078,6 +1147,9 @@ function leaveGame() {
     reconnecting.value = false;
     gameMode.value = 'classic';
     respawnCountdown.value = 0;
+    wallShiftWarning.value = '';
+    arenaShrinkWarning.value = false;
+    pendingWallRotationMap = '';
     Object.keys(dmTotalKills).forEach(k => delete dmTotalKills[k]);
     if (effectTickInterval) { clearInterval(effectTickInterval); effectTickInterval = null; }
     if (disconnectInterval) { clearInterval(disconnectInterval); disconnectInterval = null; }
@@ -1727,6 +1799,20 @@ function toggleReady() {
                     <span class="text-gray-500"> eliminated </span>
                     <span class="text-gray-300">{{ kill.target }}</span>
                 </template>
+            </div>
+        </div>
+
+        <!-- Deathmatch Warnings -->
+        <div v-if="wallShiftWarning" class="absolute top-1/3 left-1/2 -translate-x-1/2 pointer-events-none z-10">
+            <div class="px-6 py-3 bg-red-500/30 border border-red-500/50 rounded-lg animate-pulse text-center">
+                <p class="text-red-400 font-mono text-2xl font-black">WALLS SHIFTING</p>
+                <p class="text-gray-400 font-mono text-xs mt-1">New layout incoming...</p>
+            </div>
+        </div>
+        <div v-if="arenaShrinkWarning" class="absolute top-1/3 left-1/2 -translate-x-1/2 pointer-events-none z-10">
+            <div class="px-6 py-3 bg-orange-500/30 border border-orange-500/50 rounded-lg animate-pulse text-center">
+                <p class="text-orange-400 font-mono text-2xl font-black">ARENA SHRINKING</p>
+                <p class="text-gray-400 font-mono text-xs mt-1">Get to the center!</p>
             </div>
         </div>
 
