@@ -39,6 +39,11 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+        env:
+          VITE_REVERB_APP_KEY: ${{ secrets.VITE_REVERB_APP_KEY }}
+          VITE_REVERB_HOST: ${{ secrets.VITE_REVERB_HOST }}
+          VITE_REVERB_PORT: "443"
+          VITE_REVERB_SCHEME: "https"
 
       - name: Run tests
         run: ./vendor/bin/phpunit
