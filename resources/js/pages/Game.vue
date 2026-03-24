@@ -141,13 +141,15 @@ function initEcho() {
 }
 
 
-async function createRoom(mode: GameMode = 'classic') {
+const DEATHMATCH_ROOM = 'DMTH';
+
+async function createRoom() {
     if (!nickname.value.trim()) {
         errorMsg.value = 'Enter a nickname';
         return;
     }
     errorMsg.value = '';
-    gameMode.value = mode;
+    gameMode.value = 'classic';
     const code = generateRoomCode();
     roomCode.value = code;
     isAdmin.value = true;
@@ -160,8 +162,116 @@ async function createRoom(mode: GameMode = 'classic') {
         player_count: 1,
         status: 'lobby',
         player_names: [nickname.value],
-        game_mode: mode,
+        game_mode: 'classic',
     });
+}
+
+async function joinDeathmatch() {
+    if (!nickname.value.trim()) {
+        errorMsg.value = 'Enter a nickname';
+        return;
+    }
+    errorMsg.value = '';
+    gameMode.value = 'deathmatch';
+    roomCode.value = DEATHMATCH_ROOM;
+    selectedMap.value = 'open';
+
+    await joinChannel(DEATHMATCH_ROOM);
+
+    // First player in becomes admin (handles powerup spawning)
+    if (players.length <= 1) {
+        isAdmin.value = true;
+    }
+
+    // Register/update the persistent room
+    apiPost('/api/game/room/register', {
+        room_code: DEATHMATCH_ROOM,
+        host_name: 'DEATHMATCH',
+        map_name: 'open',
+        player_count: players.length,
+        status: 'playing',
+        player_names: players.map(p => p.name),
+        game_mode: 'deathmatch',
+    });
+
+    // Skip lobby/countdown — go straight to playing
+    const spawnIndex = Math.floor(Math.random() * 8);
+    const assignments: Record<string, number> = {};
+    assignments[localId.value] = spawnIndex;
+    // Include existing players
+    for (const p of players) {
+        if (p.id !== localId.value) {
+            assignments[p.id] = Math.floor(Math.random() * 8);
+        }
+    }
+    currentSpawnAssignments = { ...assignments };
+
+    // Init deathmatch state
+    myHp.value = DEFAULT_CONFIG.maxHp;
+    alive.value = true;
+    killFeed.splice(0, killFeed.length);
+    Object.keys(gameKills).forEach(k => delete gameKills[k]);
+    Object.keys(gameDeaths).forEach(k => delete gameDeaths[k]);
+    Object.keys(dmTotalKills).forEach(k => delete dmTotalKills[k]);
+    players.forEach(p => { dmTotalKills[p.id] = 0; });
+
+    phase.value = 'playing';
+    effectTickInterval = window.setInterval(() => { now.value = performance.now(); }, 200);
+    await nextTick();
+
+    if (!canvasRef.value) return;
+
+    const localPlayer = players.find(p => p.id === localId.value);
+    const localInfo: PlayerInfo = {
+        id: localId.value,
+        name: localPlayer?.name || nickname.value,
+        color: localPlayer?.color || TANK_COLORS[0],
+        isAdmin: isAdmin.value,
+    };
+
+    engine = new GameEngine(canvasRef.value, localId.value, localInfo, {
+        onFire(event) { network?.sendFire(event); },
+        onTankState(state) { network?.sendTankState(state); },
+        onHit(data) { network?.sendHit(data); },
+        onDeath(data) {
+            alive.value = false;
+            network?.sendDeath(data);
+            handleDeathmatchLocalDeath(data.killerId);
+        },
+        onGameOver() {},
+        onHpChange(hp) { myHp.value = hp; },
+        onKill(killerName, targetName) {
+            killFeed.push({ killer: killerName, target: targetName, time: Date.now() });
+            if (killFeed.length > 5) killFeed.shift();
+            const killer = players.find(p => p.name === killerName);
+            const target = players.find(p => p.name === targetName);
+            if (killer) gameKills[killer.id] = (gameKills[killer.id] || 0) + 1;
+            if (target) gameDeaths[target.id] = (gameDeaths[target.id] || 0) + 1;
+        },
+        onPowerupSpawn(event) { network?.sendPowerupSpawn(event); },
+        onPowerupPickup(event) { network?.sendPowerupPickup(event); },
+        onEffectsChange(effects) { activeEffects.splice(0, activeEffects.length, ...effects); },
+        onRainBullets(event: RainBulletsEvent) { network?.sendRainBullets(event); },
+        onGulag() {},
+        onFreeze(data) { network?.sendFreeze(data); },
+    }, undefined, 'open', 'deathmatch');
+
+    engine.init();
+    engine.spawnLocal(spawnIndex);
+
+    // Add any players already in the room as remote tanks
+    for (const p of players) {
+        if (p.id !== localId.value) {
+            engine.addRemoteTank(p.id, {
+                id: p.id,
+                name: p.name,
+                color: p.color,
+                isAdmin: p.isAdmin,
+            }, assignments[p.id] ?? 0);
+        }
+    }
+
+    engine.start();
 }
 
 async function joinRoom() {
@@ -405,8 +515,8 @@ async function joinChannel(code: string) {
                         }
                     }, 1000);
                 }
-            } else if (players.length === 0) {
-                // Everyone left
+            } else if (players.length === 0 && gameMode.value !== 'deathmatch') {
+                // Everyone left (classic only — deathmatch room persists)
                 apiPost('/api/game/room/unregister', { room_code: roomCode.value });
             } else {
                 syncRoom();
@@ -940,7 +1050,8 @@ function requestRematch() {
 
 function leaveGame() {
     clearSessionStorage();
-    if (isAdmin.value && roomCode.value) {
+    // Don't unregister persistent deathmatch room
+    if (isAdmin.value && roomCode.value && gameMode.value !== 'deathmatch') {
         apiPost('/api/game/room/unregister', { room_code: roomCode.value });
     }
     engine?.destroy();
@@ -978,6 +1089,8 @@ function handleBeforeUnload() {
     if (phase.value === 'playing' || phase.value === 'countdown') {
         return;
     }
+    // Never unregister the persistent deathmatch room
+    if (gameMode.value === 'deathmatch') return;
     if (roomCode.value) {
         const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
         fetch('/api/game/room/unregister', {
@@ -1075,7 +1188,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
     window.removeEventListener('beforeunload', handleBeforeUnload);
-    if (isAdmin.value && roomCode.value) {
+    if (isAdmin.value && roomCode.value && gameMode.value !== 'deathmatch') {
         apiPost('/api/game/room/unregister', { room_code: roomCode.value });
     }
     engine?.destroy();
@@ -1257,13 +1370,13 @@ function toggleReady() {
             <div v-else class="space-y-3">
                 <div class="flex gap-3">
                     <button
-                        @click="createRoom('classic')"
+                        @click="createRoom()"
                         class="flex-1 py-3 bg-emerald-500 hover:bg-emerald-400 text-black font-bold rounded-lg transition-colors text-lg font-mono"
                     >
                         CREATE ROOM
                     </button>
                     <button
-                        @click="createRoom('deathmatch')"
+                        @click="joinDeathmatch()"
                         class="flex-1 py-3 bg-red-500 hover:bg-red-400 text-white font-bold rounded-lg transition-colors text-lg font-mono"
                     >
                         DEATHMATCH
@@ -1368,11 +1481,7 @@ function toggleReady() {
     <div v-else-if="phase === 'lobby' && roomCode" class="min-h-screen bg-[#1a1a2e] flex items-center justify-center">
         <div class="w-full max-w-md p-8">
             <div class="text-center mb-6">
-                <h2 class="text-2xl font-bold text-white font-mono mb-1">
-                    {{ gameMode === 'deathmatch' ? 'DEATHMATCH' : 'WAITING ROOM' }}
-                </h2>
-                <p v-if="gameMode === 'deathmatch'" class="text-red-400 text-xs font-mono mb-3">Unlimited respawns &middot; Most kills wins</p>
-                <div v-else class="mb-4"></div>
+                <h2 class="text-2xl font-bold text-white font-mono mb-4">WAITING ROOM</h2>
                 <div class="flex items-center justify-center gap-3">
                     <span class="text-4xl font-black text-emerald-400 tracking-[0.3em] font-mono">{{ roomCode }}</span>
                     <button

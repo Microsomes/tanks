@@ -382,7 +382,7 @@
           - "──────────────────────────────────────────────────────────"
           - ""
           - "  1. Copy the key above"
-          - "  2. Go to: https://github.com/Microsomes/laravel-docker-vue-starter-2026/settings/keys"
+          - "  2. Go to: https://github.com/Microsomes/tanks/settings/keys"
           - "  3. Click 'Add deploy key' and paste it"
           - ""
           - "  Then run Stage 2:"
@@ -408,6 +408,14 @@
       tags: [stage2]
 
     # --- Clone repo -------------------------------------------------------
+    - name: Fix ownership of app directory before pull
+      file:
+        path: "{{ app_path }}"
+        owner: "{{ deploy_user }}"
+        group: www-data
+        recurse: true
+      tags: [stage2]
+
     - name: Clone application repository
       become_user: "{{ deploy_user }}"
       git:
@@ -460,18 +468,27 @@
       tags: [stage2]
 
     # --- Frontend build (after Laravel is bootstrapped) -------------------
-    - name: npm ci
-      become_user: "{{ deploy_user }}"
-      shell: npm ci
+    - name: Build frontend locally
+      delegate_to: localhost
+      become: false
+      shell: npm ci && npm run build
       args:
-        chdir: "{{ app_path }}"
+        chdir: "{{ playbook_dir }}/../../.."
       tags: [stage2]
 
-    - name: npm run build
-      become_user: "{{ deploy_user }}"
-      shell: npm run build
-      args:
-        chdir: "{{ app_path }}"
+    - name: Upload built frontend assets
+      synchronize:
+        src: "{{ playbook_dir }}/../../../public/build/"
+        dest: "{{ app_path }}/public/build/"
+        delete: true
+      tags: [stage2]
+
+    - name: Fix frontend asset ownership
+      file:
+        path: "{{ app_path }}/public/build"
+        owner: "{{ deploy_user }}"
+        group: www-data
+        recurse: true
       tags: [stage2]
 
     # --- Cache config -----------------------------------------------------
