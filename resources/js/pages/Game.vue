@@ -175,6 +175,8 @@ async function joinDeathmatch() {
     gameMode.value = 'deathmatch';
     roomCode.value = DEATHMATCH_ROOM;
     selectedMap.value = 'open';
+    phase.value = 'countdown';
+    countdown.value = 0;
 
     await joinChannel(DEATHMATCH_ROOM);
 
@@ -1628,10 +1630,19 @@ function toggleReady() {
     <!-- COUNTDOWN -->
     <div v-else-if="phase === 'countdown'" class="min-h-screen bg-[#1a1a2e] flex items-center justify-center">
         <div class="text-center">
-            <div class="text-[12rem] font-black text-emerald-400 leading-none font-mono animate-pulse">
-                {{ countdown }}
-            </div>
-            <p class="text-gray-400 font-mono mt-4">Get ready!</p>
+            <template v-if="gameMode === 'deathmatch'">
+                <div class="text-4xl font-black text-red-400 font-mono animate-pulse">DEATHMATCH</div>
+                <div class="mt-6 flex justify-center">
+                    <div class="w-8 h-8 border-4 border-red-400 border-t-transparent rounded-full animate-spin"></div>
+                </div>
+                <p class="text-gray-400 font-mono mt-4 text-sm">Joining arena...</p>
+            </template>
+            <template v-else>
+                <div class="text-[12rem] font-black text-emerald-400 leading-none font-mono animate-pulse">
+                    {{ countdown }}
+                </div>
+                <p class="text-gray-400 font-mono mt-4">Get ready!</p>
+            </template>
         </div>
     </div>
 
