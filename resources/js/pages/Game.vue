@@ -6,8 +6,8 @@ import Pusher from 'pusher-js';
 import { GameEngine } from '@/game/engine';
 import { GameNetwork } from '@/game/network';
 import { AudioManager } from '@/game/audio';
-import { DEFAULT_CONFIG, TANK_COLORS, GULAG_CONFIG } from '@/game/types';
-import type { PlayerInfo, GamePhase, TankState, FireEvent, HitEvent, ActiveEffect, PowerupType, RainBulletsEvent, GulagEvent, GulagResultEvent } from '@/game/types';
+import { DEFAULT_CONFIG, TANK_COLORS, GULAG_CONFIG, DEATHMATCH_CONFIG } from '@/game/types';
+import type { PlayerInfo, GamePhase, GameMode, TankState, FireEvent, HitEvent, ActiveEffect, PowerupType, RainBulletsEvent, GulagEvent, GulagResultEvent } from '@/game/types';
 import type { MapName } from '@/game/arena';
 import { MAP_NAMES } from '@/game/arena';
 
@@ -53,6 +53,9 @@ const gulagInProgress = ref(false); // prevents win condition check
 const spectating = ref(false);
 const now = ref(performance.now());
 const disconnectTimer = ref(0);
+const gameMode = ref<GameMode>('classic');
+const respawnCountdown = ref(0);
+const dmTotalKills = reactive<Record<string, number>>({});
 let disconnectInterval: number | null = null;
 const rematchRequested = ref(false);
 const rematchRequestedBy = reactive<Set<string>>(new Set());
@@ -138,12 +141,13 @@ function initEcho() {
 }
 
 
-async function createRoom() {
+async function createRoom(mode: GameMode = 'classic') {
     if (!nickname.value.trim()) {
         errorMsg.value = 'Enter a nickname';
         return;
     }
     errorMsg.value = '';
+    gameMode.value = mode;
     const code = generateRoomCode();
     roomCode.value = code;
     isAdmin.value = true;
@@ -156,6 +160,7 @@ async function createRoom() {
         player_count: 1,
         status: 'lobby',
         player_names: [nickname.value],
+        game_mode: mode,
     });
 }
 
@@ -300,35 +305,47 @@ async function joinChannel(code: string) {
                     disconnectInterval = null;
                     disconnectTimer.value = 0;
                 }
-                // Player reconnected mid-game — show notification and re-add their tank
-                killFeed.push({ killer: 'SYSTEM', target: `${member.name} reconnected`, time: Date.now() });
+                // Player joined/reconnected mid-game — show notification and add their tank
+                killFeed.push({ killer: 'SYSTEM', target: `${member.name} ${gameMode.value === 'deathmatch' ? 'joined' : 'reconnected'}`, time: Date.now() });
                 if (killFeed.length > 5) killFeed.shift();
                 network?.sendPlayerReconnect({ id: member.id, name: member.name });
+
+                // In deathmatch, init their kill counter
+                if (gameMode.value === 'deathmatch') {
+                    dmTotalKills[member.id] = 0;
+                }
+
                 // Skip adding tank during gulag — tank state whispers will sync after gulag ends
                 if (!gulagInProgress.value) {
-                    // Re-add their tank — fetch last position from DB
-                    const spawnIdx = currentSpawnAssignments[member.id] ?? 0;
+                    const spawnIdx = currentSpawnAssignments[member.id] ?? Math.floor(Math.random() * 8);
+                    currentSpawnAssignments[member.id] = spawnIdx;
                     const tankInfo: PlayerInfo = {
                         id: member.id,
                         name: member.name,
                         color: member.color || TANK_COLORS[0],
                         isAdmin: false,
                     };
-                    fetch(`/api/game/session?room_code=${roomCode.value}&player_identifier=${member.id}`)
-                        .then(r => r.json())
-                        .then(data => {
-                            if (data.session && engine) {
-                                const s = data.session;
-                                engine.addRemoteTank(member.id, tankInfo, spawnIdx, {
-                                    x: s.x, z: s.z, rotation: s.body_rotation, hp: s.hp,
-                                });
-                            } else if (engine) {
-                                engine.addRemoteTank(member.id, tankInfo, spawnIdx);
-                            }
-                        })
-                        .catch(() => {
-                            engine?.addRemoteTank(member.id, tankInfo, spawnIdx);
-                        });
+                    if (gameMode.value === 'deathmatch') {
+                        // Deathmatch: spawn at random point immediately
+                        engine.addRemoteTank(member.id, tankInfo, spawnIdx);
+                    } else {
+                        // Classic: fetch last position from DB for reconnection
+                        fetch(`/api/game/session?room_code=${roomCode.value}&player_identifier=${member.id}`)
+                            .then(r => r.json())
+                            .then(data => {
+                                if (data.session && engine) {
+                                    const s = data.session;
+                                    engine.addRemoteTank(member.id, tankInfo, spawnIdx, {
+                                        x: s.x, z: s.z, rotation: s.body_rotation, hp: s.hp,
+                                    });
+                                } else if (engine) {
+                                    engine.addRemoteTank(member.id, tankInfo, spawnIdx);
+                                }
+                            })
+                            .catch(() => {
+                                engine?.addRemoteTank(member.id, tankInfo, spawnIdx);
+                            });
+                    }
                 }
             }
             if (isAdmin.value) {
@@ -350,14 +367,18 @@ async function joinChannel(code: string) {
                 }
             }
             if (engine) {
-                killFeed.push({ killer: 'SYSTEM', target: `${member.name} disconnected`, time: Date.now() });
+                killFeed.push({ killer: 'SYSTEM', target: `${member.name} left`, time: Date.now() });
                 if (killFeed.length > 5) killFeed.shift();
                 engine.removeRemoteTank(member.id);
+                // Clean up deathmatch kills for departed player
+                if (gameMode.value === 'deathmatch') {
+                    delete dmTotalKills[member.id];
+                }
             }
             if (players.length === 1) {
                 syncRoom();
-                // If we're the only one left in an active game, start 30s grace period
-                if (engine && phase.value === 'playing' && !disconnectInterval) {
+                // If we're the only one left in an active classic game, start 30s grace period
+                if (engine && phase.value === 'playing' && gameMode.value !== 'deathmatch' && !disconnectInterval) {
                     disconnectTimer.value = 30;
                     killFeed.push({ killer: 'SYSTEM', target: `${member.name} disconnected. Waiting 30s to rejoin...`, time: Date.now() });
                     if (killFeed.length > 5) killFeed.shift();
@@ -410,7 +431,11 @@ async function joinChannel(code: string) {
         },
         onDeath(data) {
             engine?.handleRemoteDeath(data.id, data.killerId);
-            if (gulagInProgress.value && isAdmin.value) {
+            if (gameMode.value === 'deathmatch') {
+                // Track kills in deathmatch
+                dmTotalKills[data.killerId] = (dmTotalKills[data.killerId] || 0) + 1;
+                // Remote player will respawn on their own — no win condition
+            } else if (gulagInProgress.value && isAdmin.value) {
                 // Death during gulag = gulag result
                 const result: GulagResultEvent = { winnerId: data.killerId, loserId: data.id };
                 network?.sendGulagResult(result);
@@ -429,7 +454,7 @@ async function joinChannel(code: string) {
             }
         },
         onGameStart(data) {
-            startGame(data.countdown, data.spawnAssignments, data.mapName as MapName);
+            startGame(data.countdown, data.spawnAssignments, data.mapName as MapName, (data as any).gameMode);
         },
         onGameOver(data) {
             phase.value = 'gameover';
@@ -467,6 +492,7 @@ async function joinChannel(code: string) {
                     spawnAssignments: currentSpawnAssignments,
                     mapName: selectedMap.value,
                     phase: phase.value,
+                    gameMode: gameMode.value,
                 });
             }
         },
@@ -479,7 +505,7 @@ async function joinChannel(code: string) {
                 if (!(localId.value in assignments)) {
                     assignments[localId.value] = savedSpawn;
                 }
-                startGame(0, assignments, data.mapName as MapName);
+                startGame(0, assignments, data.mapName as MapName, data.gameMode);
             }
         },
         onPlayerDisconnect(data) {
@@ -503,6 +529,9 @@ async function joinChannel(code: string) {
         onFreeze(data) {
             engine?.applyRemoteFreeze(data.activatorId);
         },
+        onDeathmatchRespawn(data) {
+            engine?.respawnForDeathmatch(data.id);
+        },
     });
 
     try {
@@ -523,12 +552,13 @@ function adminStartGame() {
         assignments[p.id] = i;
     });
 
-    network?.sendGameStart({ countdown: 3, spawnAssignments: assignments, mapName: selectedMap.value });
-    startGame(3, assignments, selectedMap.value);
+    network?.sendGameStart({ countdown: 3, spawnAssignments: assignments, mapName: selectedMap.value, gameMode: gameMode.value });
+    startGame(3, assignments, selectedMap.value, gameMode.value);
     syncRoom({ status: 'playing' });
 }
 
-async function startGame(countdownSec: number, spawnAssignments: Record<string, number>, mapName: MapName = 'classic') {
+async function startGame(countdownSec: number, spawnAssignments: Record<string, number>, mapName: MapName = 'classic', mode?: GameMode) {
+    if (mode) gameMode.value = mode;
     currentSpawnAssignments = { ...spawnAssignments };
     myHp.value = DEFAULT_CONFIG.maxHp;
     alive.value = true;
@@ -536,6 +566,10 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
     killFeed.splice(0, killFeed.length);
     Object.keys(gameKills).forEach(k => delete gameKills[k]);
     Object.keys(gameDeaths).forEach(k => delete gameDeaths[k]);
+    if (gameMode.value === 'deathmatch') {
+        Object.keys(dmTotalKills).forEach(k => delete dmTotalKills[k]);
+        players.forEach(p => { dmTotalKills[p.id] = 0; });
+    }
 
     // Countdown (skip if 0, e.g. reconnecting)
     if (countdownSec > 0) {
@@ -592,7 +626,9 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
         onDeath(data) {
             alive.value = false;
             network?.sendDeath(data);
-            if (gulagInProgress.value && isAdmin.value) {
+            if (gameMode.value === 'deathmatch') {
+                handleDeathmatchLocalDeath(data.killerId);
+            } else if (gulagInProgress.value && isAdmin.value) {
                 const result: GulagResultEvent = { winnerId: data.killerId, loserId: data.id };
                 network?.sendGulagResult(result);
                 handleGulagResult(result);
@@ -653,7 +689,7 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
         onFreeze(data) {
             network?.sendFreeze(data);
         },
-    }, undefined, mapName);
+    }, undefined, mapName, gameMode.value);
 
     engine.init();
     engine.spawnLocal(spawnAssignments[localId.value] ?? 0);
@@ -714,6 +750,7 @@ function clearSessionStorage() {
 
 function checkWinCondition() {
     if (!engine || phase.value !== 'playing') return;
+    if (gameMode.value === 'deathmatch') return;
     if (gulagInProgress.value) return;
 
     const totalPlayers = engine.getTotalPlayerCount();
@@ -748,6 +785,34 @@ function checkWinCondition() {
         }
     }
 }
+
+// ─── Deathmatch ─────────────────────────────────────────────────
+async function handleDeathmatchLocalDeath(killerId: string) {
+    // Track the kill
+    dmTotalKills[killerId] = (dmTotalKills[killerId] || 0) + 1;
+
+    // Show respawn countdown
+    respawnCountdown.value = DEATHMATCH_CONFIG.respawnDelaySec;
+    for (let i = DEATHMATCH_CONFIG.respawnDelaySec; i > 0; i--) {
+        respawnCountdown.value = i;
+        await sleep(1000);
+    }
+    respawnCountdown.value = 0;
+
+    // Respawn
+    if (phase.value === 'playing' && engine) {
+        engine.respawnForDeathmatch(localId.value);
+        alive.value = true;
+        myHp.value = DEFAULT_CONFIG.maxHp;
+        network?.sendDeathmatchRespawn({ id: localId.value });
+    }
+}
+
+const dmLeaderboard = computed(() => {
+    return players
+        .map(p => ({ id: p.id, name: p.name, color: p.color, kills: dmTotalKills[p.id] || 0 }))
+        .sort((a, b) => b.kills - a.kills);
+});
 
 // ─── Map Selection ──────────────────────────────────────────────
 function selectMap(map: MapName) {
@@ -842,6 +907,8 @@ function resetGame() {
     spectating.value = false;
     Object.keys(gameKills).forEach(k => delete gameKills[k]);
     Object.keys(gameDeaths).forEach(k => delete gameDeaths[k]);
+    Object.keys(dmTotalKills).forEach(k => delete dmTotalKills[k]);
+    respawnCountdown.value = 0;
     reconnecting.value = false;
     rematchRequested.value = false;
     rematchRequestedBy.clear();
@@ -896,6 +963,9 @@ function leaveGame() {
     gulagInProgress.value = false;
     spectating.value = false;
     reconnecting.value = false;
+    gameMode.value = 'classic';
+    respawnCountdown.value = 0;
+    Object.keys(dmTotalKills).forEach(k => delete dmTotalKills[k]);
     if (effectTickInterval) { clearInterval(effectTickInterval); effectTickInterval = null; }
     if (disconnectInterval) { clearInterval(disconnectInterval); disconnectInterval = null; }
     disconnectTimer.value = 0;
@@ -1185,12 +1255,20 @@ function toggleReady() {
 
             <!-- Normal lobby -->
             <div v-else class="space-y-3">
-                <button
-                    @click="createRoom"
-                    class="w-full py-3 bg-emerald-500 hover:bg-emerald-400 text-black font-bold rounded-lg transition-colors text-lg font-mono"
-                >
-                    CREATE ROOM
-                </button>
+                <div class="flex gap-3">
+                    <button
+                        @click="createRoom('classic')"
+                        class="flex-1 py-3 bg-emerald-500 hover:bg-emerald-400 text-black font-bold rounded-lg transition-colors text-lg font-mono"
+                    >
+                        CREATE ROOM
+                    </button>
+                    <button
+                        @click="createRoom('deathmatch')"
+                        class="flex-1 py-3 bg-red-500 hover:bg-red-400 text-white font-bold rounded-lg transition-colors text-lg font-mono"
+                    >
+                        DEATHMATCH
+                    </button>
+                </div>
 
                 <div class="flex items-center gap-3">
                     <input
@@ -1221,6 +1299,7 @@ function toggleReady() {
                         <div class="flex items-center justify-between">
                             <div class="flex items-center gap-2">
                                 <span class="text-emerald-400 font-mono font-bold tracking-wider">{{ room.room_code }}</span>
+                                <span v-if="(room as any).game_mode === 'deathmatch'" class="text-xs font-mono px-2 py-0.5 rounded bg-red-500/20 text-red-400">DM</span>
                                 <span class="text-gray-600 text-xs font-mono">{{ room.map_name }}</span>
                                 <span class="text-xs font-mono px-2 py-0.5 rounded"
                                       :class="room.status === 'playing' ? 'bg-red-500/20 text-red-400' : 'bg-emerald-500/20 text-emerald-400'">
@@ -1289,7 +1368,11 @@ function toggleReady() {
     <div v-else-if="phase === 'lobby' && roomCode" class="min-h-screen bg-[#1a1a2e] flex items-center justify-center">
         <div class="w-full max-w-md p-8">
             <div class="text-center mb-6">
-                <h2 class="text-2xl font-bold text-white font-mono mb-4">WAITING ROOM</h2>
+                <h2 class="text-2xl font-bold text-white font-mono mb-1">
+                    {{ gameMode === 'deathmatch' ? 'DEATHMATCH' : 'WAITING ROOM' }}
+                </h2>
+                <p v-if="gameMode === 'deathmatch'" class="text-red-400 text-xs font-mono mb-3">Unlimited respawns &middot; Most kills wins</p>
+                <div v-else class="mb-4"></div>
                 <div class="flex items-center justify-center gap-3">
                     <span class="text-4xl font-black text-emerald-400 tracking-[0.3em] font-mono">{{ roomCode }}</span>
                     <button
@@ -1475,9 +1558,23 @@ function toggleReady() {
                     </div>
                 </div>
 
-                <!-- Room code -->
-                <div class="text-gray-500 font-mono text-xs">{{ roomCode }}</div>
+                <!-- Room code / Deathmatch info -->
+                <div class="flex items-start gap-3">
+                    <div v-if="gameMode === 'deathmatch'" class="text-right">
+                        <span class="text-red-400 font-mono text-xs font-bold">DEATHMATCH</span>
+                    </div>
+                    <div v-else class="text-gray-500 font-mono text-xs">{{ roomCode }}</div>
+                </div>
             </div>
+
+            <!-- Deathmatch: Leave button top-left -->
+            <button
+                v-if="gameMode === 'deathmatch'"
+                @click="leaveGame"
+                class="absolute top-14 left-4 px-4 py-2 bg-red-500/30 hover:bg-red-500/50 border border-red-500/40 text-red-400 text-sm font-mono font-bold rounded-lg transition-colors"
+            >
+                LEAVE MATCH
+            </button>
         </div>
 
         <!-- Disconnect grace period banner -->
@@ -1490,7 +1587,8 @@ function toggleReady() {
         </div>
 
         <!-- Kill feed -->
-        <div class="absolute top-16 right-4 space-y-1 pointer-events-none">
+        <div class="absolute space-y-1 pointer-events-none"
+             :class="gameMode === 'deathmatch' ? 'bottom-16 right-4' : 'top-16 right-4'">
             <div
                 v-for="(kill, i) in killFeed"
                 :key="i"
@@ -1512,9 +1610,29 @@ function toggleReady() {
             </div>
         </div>
 
+        <!-- Deathmatch Leaderboard -->
+        <div v-if="gameMode === 'deathmatch'" class="absolute top-4 right-4 pointer-events-none">
+            <div class="bg-black/60 border border-red-500/30 rounded-lg px-3 py-2 min-w-[160px]">
+                <p class="text-red-400 font-mono text-xs font-bold mb-1.5 text-center">KILLS</p>
+                <div
+                    v-for="(entry, i) in dmLeaderboard"
+                    :key="entry.id"
+                    class="flex items-center gap-2 py-0.5"
+                >
+                    <span class="text-gray-500 font-mono text-[10px] w-3">{{ i + 1 }}</span>
+                    <div class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: entry.color }"></div>
+                    <span class="font-mono text-xs flex-1 truncate"
+                          :class="entry.id === localId ? 'text-white font-bold' : 'text-gray-300'">
+                        {{ entry.name }}
+                    </span>
+                    <span class="text-red-400 font-mono text-xs font-bold">{{ entry.kills }}</span>
+                </div>
+            </div>
+        </div>
+
         <!-- Dead / Spectate overlay -->
         <div v-if="!alive && phase === 'playing'" class="absolute inset-0 flex items-center justify-center pointer-events-none"
-             :class="spectating ? 'bg-black/20' : 'bg-black/50'">
+             :class="spectating ? 'bg-black/20' : (gameMode === 'deathmatch' ? 'bg-black/40' : 'bg-black/50')">
             <div class="text-center">
                 <template v-if="spectating">
                     <div class="absolute top-20 left-1/2 -translate-x-1/2">
@@ -1523,13 +1641,18 @@ function toggleReady() {
                         </span>
                     </div>
                 </template>
+                <template v-else-if="gameMode === 'deathmatch' && respawnCountdown > 0">
+                    <p class="text-3xl font-black text-red-500 font-mono">KILLED</p>
+                    <p class="text-7xl font-black text-white font-mono mt-4 animate-pulse">{{ respawnCountdown }}</p>
+                    <p class="text-gray-400 font-mono mt-2 text-sm">Respawning...</p>
+                </template>
                 <template v-else-if="gulagActive">
                     <p class="text-5xl font-black text-yellow-400 font-mono animate-pulse">GULAG!</p>
                     <p v-if="gulagCountdown > 0" class="text-8xl font-black text-white font-mono mt-4">{{ gulagCountdown }}</p>
                     <p class="text-gray-300 font-mono mt-2 text-lg">vs <span class="text-red-400 font-bold">{{ gulagOpponent }}</span></p>
                     <p v-if="gulagCountdown === 0" class="text-emerald-400 font-mono mt-2 text-sm">FIGHT!</p>
                 </template>
-                <template v-else>
+                <template v-else-if="gameMode !== 'deathmatch'">
                     <p class="text-4xl font-black text-red-500 font-mono">ELIMINATED</p>
                     <p class="text-gray-400 font-mono mt-2">Spectating...</p>
                 </template>
@@ -1544,6 +1667,7 @@ function toggleReady() {
                 <p>Click — Fire</p>
             </div>
             <button
+                v-if="gameMode !== 'deathmatch'"
                 @click="leaveGame"
                 class="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/40 border border-red-500/30 text-red-400 text-xs font-mono rounded transition-colors"
             >

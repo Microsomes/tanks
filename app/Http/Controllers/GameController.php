@@ -116,6 +116,7 @@ class GameController extends Controller
             'player_count' => 'sometimes|integer|min:1',
             'status' => 'sometimes|string|in:lobby,playing',
             'player_names' => 'sometimes|array',
+            'game_mode' => 'sometimes|string|in:classic,deathmatch',
         ]);
 
         $data = collect($validated)->except('player_names')->toArray();

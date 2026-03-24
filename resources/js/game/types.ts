@@ -103,6 +103,13 @@ export interface Projectile {
 }
 
 export type GamePhase = 'lobby' | 'countdown' | 'playing' | 'gameover';
+export type GameMode = 'classic' | 'deathmatch';
+
+export const DEATHMATCH_CONFIG = {
+    respawnDelaySec: 3,
+    respawnHp: 5, // full HP on respawn
+    respawnGrace: 2, // seconds of invulnerability after respawn
+} as const;
 
 // ─── Powerups ────────────────────────────────────────────────────
 export type PowerupType =

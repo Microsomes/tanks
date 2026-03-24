@@ -1,5 +1,5 @@
 import type Echo from 'laravel-echo';
-import type { TankState, FireEvent, HitEvent, PowerupSpawnEvent, PowerupPickupEvent, RainBulletsEvent, GulagEvent, GulagResultEvent } from './types';
+import type { GameMode, TankState, FireEvent, HitEvent, PowerupSpawnEvent, PowerupPickupEvent, RainBulletsEvent, GulagEvent, GulagResultEvent } from './types';
 
 export type PresenceMember = { id: string; name: string; color: string };
 
@@ -13,7 +13,7 @@ export interface NetworkCallbacks {
     onFire: (event: FireEvent) => void;
     onHit: (event: HitEvent) => void;
     onDeath: (data: { id: string; killerId: string }) => void;
-    onGameStart: (data: { countdown: number; spawnAssignments: Record<string, number>; mapName: string }) => void;
+    onGameStart: (data: { countdown: number; spawnAssignments: Record<string, number>; mapName: string; gameMode?: GameMode }) => void;
     onMapChange: (data: { mapName: string }) => void;
     onGulag: (event: GulagEvent) => void;
     onGulagResult: (event: GulagResultEvent) => void;
@@ -23,11 +23,12 @@ export interface NetworkCallbacks {
     onPowerupPickup: (event: PowerupPickupEvent) => void;
     onRainBullets: (event: RainBulletsEvent) => void;
     onRequestState: (data: { requesterId: string }) => void;
-    onGameState: (data: { spawnAssignments: Record<string, number>; mapName: string; phase: string }) => void;
+    onGameState: (data: { spawnAssignments: Record<string, number>; mapName: string; phase: string; gameMode?: GameMode }) => void;
     onPlayerDisconnect: (data: { id: string; name: string }) => void;
     onPlayerReconnect: (data: { id: string; name: string }) => void;
     onRematchRequest: (data: { id: string; name: string }) => void;
     onFreeze: (data: { activatorId: string }) => void;
+    onDeathmatchRespawn: (data: { id: string }) => void;
 }
 
 /**
@@ -128,7 +129,7 @@ export class GameNetwork {
                 .listenForWhisper('death', (data: { id: string; killerId: string }) => {
                     this.callbacks.onDeath(data);
                 })
-                .listenForWhisper('game-start', (data: { countdown: number; spawnAssignments: Record<string, number>; mapName: string }) => {
+                .listenForWhisper('game-start', (data: { countdown: number; spawnAssignments: Record<string, number>; mapName: string; gameMode?: GameMode }) => {
                     this.callbacks.onGameStart(data);
                 })
                 .listenForWhisper('map-change', (data: { mapName: string }) => {
@@ -158,7 +159,7 @@ export class GameNetwork {
                 .listenForWhisper('request-state', (data: { requesterId: string }) => {
                     this.callbacks.onRequestState(data);
                 })
-                .listenForWhisper('game-state', (data: { spawnAssignments: Record<string, number>; mapName: string; phase: string }) => {
+                .listenForWhisper('game-state', (data: { spawnAssignments: Record<string, number>; mapName: string; phase: string; gameMode?: GameMode }) => {
                     this.callbacks.onGameState(data);
                 })
                 .listenForWhisper('player-disconnect', (data: { id: string; name: string }) => {
@@ -172,6 +173,9 @@ export class GameNetwork {
                 })
                 .listenForWhisper('freeze', (data: { activatorId: string }) => {
                     this.callbacks.onFreeze(data);
+                })
+                .listenForWhisper('deathmatch-respawn', (data: { id: string }) => {
+                    this.callbacks.onDeathmatchRespawn(data);
                 });
         });
     }
@@ -208,7 +212,7 @@ export class GameNetwork {
         this.channel?.whisper('death', data);
     }
 
-    sendGameStart(data: { countdown: number; spawnAssignments: Record<string, number>; mapName: string }) {
+    sendGameStart(data: { countdown: number; spawnAssignments: Record<string, number>; mapName: string; gameMode?: GameMode }) {
         this.channel?.whisper('game-start', data);
     }
 
@@ -248,7 +252,7 @@ export class GameNetwork {
         this.channel?.whisper('request-state', data);
     }
 
-    sendGameState(data: { spawnAssignments: Record<string, number>; mapName: string; phase: string }) {
+    sendGameState(data: { spawnAssignments: Record<string, number>; mapName: string; phase: string; gameMode?: GameMode }) {
         this.channel?.whisper('game-state', data);
     }
 
@@ -266,6 +270,10 @@ export class GameNetwork {
 
     sendFreeze(data: { activatorId: string }) {
         this.channel?.whisper('freeze', data);
+    }
+
+    sendDeathmatchRespawn(data: { id: string }) {
+        this.channel?.whisper('deathmatch-respawn', data);
     }
 
     leave() {

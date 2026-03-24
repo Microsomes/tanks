@@ -37,8 +37,8 @@ import type {
     ActiveEffect,
     RainBulletsEvent,
 } from './types';
-import { DEFAULT_CONFIG, TANK_COLORS, POWERUP_CONFIG, GULAG_CONFIG } from './types';
-import type { GulagEvent, GulagResultEvent } from './types';
+import { DEFAULT_CONFIG, TANK_COLORS, POWERUP_CONFIG, GULAG_CONFIG, DEATHMATCH_CONFIG } from './types';
+import type { GameMode, GulagEvent, GulagResultEvent } from './types';
 
 interface RemoteTank {
     mesh: TankMesh;
@@ -144,6 +144,9 @@ export class GameEngine {
     // Respawn invulnerability
     private respawnGrace = 0;
 
+    // Game mode
+    private gameMode: GameMode = 'classic';
+
     constructor(
         private canvas: HTMLCanvasElement,
         localId: string,
@@ -151,6 +154,7 @@ export class GameEngine {
         callbacks: GameEngineCallbacks,
         config?: Partial<GameConfig>,
         mapName?: MapName,
+        gameMode?: GameMode,
     ) {
         this.localId = localId;
         this.localInfo = localInfo;
@@ -160,6 +164,7 @@ export class GameEngine {
         this.isAdmin = localInfo.isAdmin;
         this.nextSpawnDelay = this.randomSpawnDelay();
         this.mapName = mapName ?? 'classic';
+        this.gameMode = gameMode ?? 'classic';
     }
 
     init() {
@@ -477,6 +482,55 @@ export class GameEngine {
                 remote.spawnAnim = 0;
             }
         }
+    }
+
+    // ─── Deathmatch Respawn ─────────────────────────────────────────
+
+    respawnForDeathmatch(playerId: string) {
+        const spawns = getSpawnPoints(this.config);
+        const spawnIndex = Math.floor(Math.random() * spawns.length);
+        const spawn = spawns[spawnIndex];
+        const hp = this.config.maxHp;
+
+        if (playerId === this.localId) {
+            this.localAlive = true;
+            this.localHp = hp;
+            this.localX = spawn.x;
+            this.localZ = spawn.z;
+            this.localBodyRot = spawn.rotation;
+            this.localTank.group.position.set(this.localX, 0, this.localZ);
+            this.localTank.group.rotation.y = this.localBodyRot;
+            this.localTank.group.visible = true;
+            updateHpBar(this.localTank.hpBar, this.localHp);
+            this.callbacks.onHpChange(this.localHp);
+            this.respawnGrace = DEATHMATCH_CONFIG.respawnGrace;
+
+            // Spawn-in animation
+            this.localTank.group.scale.set(0.01, 0.01, 0.01);
+            this.spawnAnimating = true;
+            this.spawnAnimTime = 0;
+        } else {
+            const remote = this.remoteTanks.get(playerId);
+            if (remote) {
+                remote.alive = true;
+                remote.hp = hp;
+                remote.targetX = spawn.x;
+                remote.targetZ = spawn.z;
+                remote.targetBodyRot = spawn.rotation;
+                remote.mesh.group.position.set(spawn.x, 0, spawn.z);
+                remote.mesh.group.rotation.y = spawn.rotation;
+                remote.mesh.group.visible = true;
+                updateHpBar(remote.mesh.hpBar, hp);
+
+                // Spawn-in animation
+                remote.mesh.group.scale.set(0.01, 0.01, 0.01);
+                remote.spawnAnim = 0;
+            }
+        }
+    }
+
+    getGameMode(): GameMode {
+        return this.gameMode;
     }
 
     // ─── Lifecycle ──────────────────────────────────────────────────

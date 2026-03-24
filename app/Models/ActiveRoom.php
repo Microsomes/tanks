@@ -14,6 +14,7 @@ class ActiveRoom extends Model
         'players_json',
         'status',
         'max_players',
+        'game_mode',
     ];
 
     protected function casts(): array
