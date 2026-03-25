@@ -9,6 +9,17 @@ export interface WallObject {
     mesh: THREE.Mesh;
 }
 
+export interface MovingWall {
+    wall: WallObject;
+    startX: number;
+    startZ: number;
+    endX: number;
+    endZ: number;
+    speed: number; // units per second
+    progress: number; // 0 to 1
+    direction: 1 | -1;
+}
+
 export interface ArenaResult {
     boundaryWalls: WallObject[];
     interiorWalls: WallObject[];
@@ -244,6 +255,83 @@ function buildMazeWalls(addWall: AddWallFn, W: number, H: number) {
             }
         }
     }
+}
+
+// ─── Moving Walls (Deathmatch) ──────────────────────────────────────
+
+export function createMovingWalls(scene: THREE.Scene, config: GameConfig): MovingWall[] {
+    const { arenaWidth: W, arenaHeight: H } = config;
+    const mat = new THREE.MeshLambertMaterial({ color: 0xff4466, flatShading: true });
+    const walls: MovingWall[] = [];
+
+    function addMoving(
+        startX: number, startZ: number,
+        endX: number, endZ: number,
+        w: number, d: number, speed: number,
+    ) {
+        const h = 2;
+        const geo = new THREE.BoxGeometry(w, h, d);
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(startX, h / 2, startZ);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        scene.add(mesh);
+        const data: Wall = { x: startX, z: startZ, width: w, depth: d, height: h };
+        walls.push({
+            wall: { data, mesh },
+            startX, startZ,
+            endX, endZ,
+            speed,
+            progress: Math.random(), // stagger start positions
+            direction: 1,
+        });
+    }
+
+    // Horizontal patrollers
+    addMoving(-W * 0.3, -H * 0.15, W * 0.3, -H * 0.15, 3, 1, 4);
+    addMoving(W * 0.3, H * 0.15, -W * 0.3, H * 0.15, 3, 1, 5);
+
+    // Vertical patrollers
+    addMoving(W * 0.15, -H * 0.3, W * 0.15, H * 0.3, 1, 3, 3);
+    addMoving(-W * 0.15, H * 0.3, -W * 0.15, -H * 0.3, 1, 3, 4);
+
+    return walls;
+}
+
+export function updateMovingWalls(movingWalls: MovingWall[], dt: number) {
+    for (const mw of movingWalls) {
+        const totalDist = Math.sqrt(
+            (mw.endX - mw.startX) ** 2 + (mw.endZ - mw.startZ) ** 2,
+        );
+        if (totalDist < 0.1) continue;
+
+        const step = (mw.speed * dt) / totalDist;
+        mw.progress += step * mw.direction;
+
+        if (mw.progress >= 1) {
+            mw.progress = 1;
+            mw.direction = -1;
+        } else if (mw.progress <= 0) {
+            mw.progress = 0;
+            mw.direction = 1;
+        }
+
+        const x = mw.startX + (mw.endX - mw.startX) * mw.progress;
+        const z = mw.startZ + (mw.endZ - mw.startZ) * mw.progress;
+        mw.wall.mesh.position.x = x;
+        mw.wall.mesh.position.z = z;
+        mw.wall.data.x = x;
+        mw.wall.data.z = z;
+    }
+}
+
+export function removeMovingWalls(movingWalls: MovingWall[], scene: THREE.Scene) {
+    for (const mw of movingWalls) {
+        scene.remove(mw.wall.mesh);
+        mw.wall.mesh.geometry.dispose();
+        (mw.wall.mesh.material as THREE.Material).dispose();
+    }
+    movingWalls.length = 0;
 }
 
 // ─── Lighting, Camera, Spawn Points ─────────────────────────────────

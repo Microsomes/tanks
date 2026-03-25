@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { createArena, createLighting, createCamera, getSpawnPoints, buildInteriorWallObjects, removeWallObjects, MAP_NAMES } from './arena';
-import type { MapName, WallObject } from './arena';
+import { createArena, createLighting, createCamera, getSpawnPoints, buildInteriorWallObjects, removeWallObjects, MAP_NAMES, createMovingWalls, updateMovingWalls, removeMovingWalls } from './arena';
+import type { MapName, WallObject, MovingWall } from './arena';
 import { createTankMesh, updateHpBar, getBarrelTip, recolorTankMesh } from './tank';
 import {
     createProjectile,
@@ -81,6 +81,7 @@ export class GameEngine {
     private walls: Wall[] = [];
     private boundaryWalls: WallObject[] = [];
     private interiorWalls: WallObject[] = [];
+    private movingWalls: MovingWall[] = [];
     private config: GameConfig;
     private input!: ReturnType<typeof createInputHandler>;
 
@@ -217,6 +218,11 @@ export class GameEngine {
             this.boundaryWalls = arena.boundaryWalls;
             this.interiorWalls = arena.interiorWalls;
             this.walls = arena.allWallData;
+
+            // Moving walls (deathmatch only)
+            if (this.gameMode === 'deathmatch') {
+                this.movingWalls = createMovingWalls(this.scene, this.config);
+            }
 
             // Local tank
             this.localTank = createTankMesh(this.localInfo.color, this.localInfo.name);
@@ -473,6 +479,7 @@ export class GameEngine {
         this.walls = [
             ...this.boundaryWalls.map(w => w.data),
             ...this.interiorWalls.map(w => w.data),
+            ...this.movingWalls.map(mw => mw.wall.data),
         ];
     }
 
@@ -524,17 +531,20 @@ export class GameEngine {
     private pushOutOfWalls(x: number, z: number, radius: number): { x: number; z: number } {
         if (!this.checkWallCollision(x, z, radius)) return { x, z };
 
-        const dirs = [
-            { dx: 1, dz: 0 }, { dx: -1, dz: 0 },
-            { dx: 0, dz: 1 }, { dx: 0, dz: -1 },
-            { dx: 0.707, dz: 0.707 }, { dx: -0.707, dz: 0.707 },
-            { dx: 0.707, dz: -0.707 }, { dx: -0.707, dz: -0.707 },
-        ];
-        for (let dist = 0.5; dist <= 6; dist += 0.5) {
+        // Try 16 directions at fine increments for smooth push-out
+        const dirs: { dx: number; dz: number }[] = [];
+        for (let a = 0; a < 16; a++) {
+            const angle = (a / 16) * Math.PI * 2;
+            dirs.push({ dx: Math.cos(angle), dz: Math.sin(angle) });
+        }
+        for (let dist = 0.3; dist <= 8; dist += 0.3) {
             for (const dir of dirs) {
                 const nx = x + dir.dx * dist;
                 const nz = z + dir.dz * dist;
-                if (!this.checkWallCollision(nx, nz, radius)) {
+                // Also check arena bounds
+                const halfW = (this.config.arenaWidth / 2 - 1.5) * this.arenaShrinkScale;
+                const halfH = (this.config.arenaHeight / 2 - 1.5) * this.arenaShrinkScale;
+                if (Math.abs(nx) < halfW && Math.abs(nz) < halfH && !this.checkWallCollision(nx, nz, radius)) {
                     return { x: nx, z: nz };
                 }
             }
@@ -932,6 +942,7 @@ export class GameEngine {
         }
         removeWallObjects(this.interiorWalls, this.scene);
         removeWallObjects(this.boundaryWalls, this.scene);
+        removeMovingWalls(this.movingWalls, this.scene);
         this.removeShrinkZoneOverlay();
         window.removeEventListener('resize', this.onResize);
         this.renderer?.dispose();
@@ -997,6 +1008,12 @@ export class GameEngine {
             }
             this.updateArenaShrink(dt);
             this.checkShrinkDamage(dt);
+
+            // Moving walls
+            if (this.movingWalls.length > 0) {
+                updateMovingWalls(this.movingWalls, dt);
+                this.rebuildWallData();
+            }
         }
 
         // Remove ghost tanks (no state update for 10s)
@@ -1146,6 +1163,13 @@ export class GameEngine {
         }
         if (!this.checkWallCollision(this.localX, this.localZ + dz, 1.2)) {
             this.localZ += dz;
+        }
+
+        // Push out if stuck inside a wall (e.g. wall rotated/moved onto us)
+        if (this.checkWallCollision(this.localX, this.localZ, 1.2)) {
+            const pushed = this.pushOutOfWalls(this.localX, this.localZ, 1.2);
+            this.localX = pushed.x;
+            this.localZ = pushed.z;
         }
 
         // Clamp to arena (respect shrink scale)
