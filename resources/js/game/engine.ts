@@ -205,13 +205,14 @@ export class GameEngine {
 
             // Scene
             this.scene = new THREE.Scene();
-            this.scene.fog = new THREE.Fog(0x1a1a2e, 60, 150);
+            const fogScale = Math.max(this.config.arenaWidth / 50, this.config.arenaHeight / 36);
+            this.scene.fog = new THREE.Fog(0x1a1a2e, 60 * fogScale, 150 * fogScale);
 
             // Camera
             this.camera = createCamera(this.config);
 
             // Lighting
-            createLighting(this.scene);
+            createLighting(this.scene, this.config);
 
             // Arena
             const arena = createArena(this.scene, this.config, this.mapName);
@@ -1127,7 +1128,8 @@ export class GameEngine {
             this.camera.position.y += (Math.random() - 0.5) * this.shakeIntensity * 0.5;
             this.shakeIntensity *= Math.max(0, 1 - this.shakeDecay * dt);
         } else {
-            this.camera.position.set(0, 40, 30); // Reset to default
+            const camScale = Math.max(this.config.arenaWidth / 50, this.config.arenaHeight / 36);
+            this.camera.position.set(0, 40 * camScale, 30 * camScale);
             this.shakeIntensity = 0;
         }
 

@@ -336,30 +336,33 @@ export function removeMovingWalls(movingWalls: MovingWall[], scene: THREE.Scene)
 
 // ─── Lighting, Camera, Spawn Points ─────────────────────────────────
 
-export function createLighting(scene: THREE.Scene) {
+export function createLighting(scene: THREE.Scene, config?: GameConfig) {
     const ambient = new THREE.AmbientLight(0x6060a0, 0.6);
     scene.add(ambient);
 
+    const shadowSize = config ? Math.max(config.arenaWidth, config.arenaHeight) / 2 + 5 : 30;
     const directional = new THREE.DirectionalLight(0xffffff, 0.8);
     directional.position.set(20, 30, 10);
     directional.castShadow = true;
     directional.shadow.mapSize.width = 2048;
     directional.shadow.mapSize.height = 2048;
     directional.shadow.camera.near = 0.5;
-    directional.shadow.camera.far = 100;
-    directional.shadow.camera.left = -30;
-    directional.shadow.camera.right = 30;
-    directional.shadow.camera.top = 30;
-    directional.shadow.camera.bottom = -30;
+    directional.shadow.camera.far = shadowSize * 4;
+    directional.shadow.camera.left = -shadowSize;
+    directional.shadow.camera.right = shadowSize;
+    directional.shadow.camera.top = shadowSize;
+    directional.shadow.camera.bottom = -shadowSize;
     scene.add(directional);
 
     const hemi = new THREE.HemisphereLight(0x8080c0, 0x404060, 0.3);
     scene.add(hemi);
 }
 
-export function createCamera(_config: GameConfig): THREE.PerspectiveCamera {
-    const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
-    camera.position.set(0, 40, 30);
+export function createCamera(config: GameConfig): THREE.PerspectiveCamera {
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 300);
+    // Scale camera height with arena size
+    const scale = Math.max(config.arenaWidth / 50, config.arenaHeight / 36);
+    camera.position.set(0, 40 * scale, 30 * scale);
     camera.lookAt(0, 0, 0);
     return camera;
 }

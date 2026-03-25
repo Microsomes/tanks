@@ -159,6 +159,7 @@ function initEcho() {
 
 
 const DEATHMATCH_ROOM = 'DMTH';
+const DEATHMATCH_ARENA = { arenaWidth: 80, arenaHeight: 60 };
 
 async function createRoom() {
     if (!nickname.value.trim()) {
@@ -295,7 +296,7 @@ async function joinDeathmatch() {
             arenaShrinkWarning.value = true;
             setTimeout(() => { arenaShrinkWarning.value = false; }, 3000);
         },
-    }, undefined, 'open', 'deathmatch');
+    }, DEATHMATCH_ARENA, 'open', 'deathmatch');
 
     engine.init();
     engine.spawnLocal(spawnIndex);
@@ -397,7 +398,7 @@ async function spectateRoom(code: string, mapName: string) {
             arenaShrinkWarning.value = true;
             setTimeout(() => { arenaShrinkWarning.value = false; }, 3000);
         },
-    }, undefined, mapName as MapName, (code === DEATHMATCH_ROOM ? 'deathmatch' : 'classic'));
+    }, (code === DEATHMATCH_ROOM ? DEATHMATCH_ARENA : undefined), mapName as MapName, (code === DEATHMATCH_ROOM ? 'deathmatch' : 'classic'));
 
     engine.init();
     // Hide local tank — spectator has no tank
