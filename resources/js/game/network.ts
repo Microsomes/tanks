@@ -28,7 +28,7 @@ export interface NetworkCallbacks {
     onPlayerReconnect: (data: { id: string; name: string }) => void;
     onRematchRequest: (data: { id: string; name: string }) => void;
     onFreeze: (data: { activatorId: string }) => void;
-    onDeathmatchRespawn: (data: { id: string }) => void;
+    onDeathmatchRespawn: (data: { id: string; color: string }) => void;
     onWallRotation: (data: { mapName: string }) => void;
     onWallRotationWarning: (data: { mapName: string }) => void;
     onArenaShrink: (data: { phase: string; targetScale: number }) => void;
@@ -178,7 +178,7 @@ export class GameNetwork {
                 .listenForWhisper('freeze', (data: { activatorId: string }) => {
                     this.callbacks.onFreeze(data);
                 })
-                .listenForWhisper('deathmatch-respawn', (data: { id: string }) => {
+                .listenForWhisper('deathmatch-respawn', (data: { id: string; color: string }) => {
                     this.callbacks.onDeathmatchRespawn(data);
                 })
                 .listenForWhisper('wall-rotation', (data: { mapName: string }) => {
@@ -288,7 +288,7 @@ export class GameNetwork {
         this.channel?.whisper('freeze', data);
     }
 
-    sendDeathmatchRespawn(data: { id: string }) {
+    sendDeathmatchRespawn(data: { id: string; color: string }) {
         this.channel?.whisper('deathmatch-respawn', data);
     }
 

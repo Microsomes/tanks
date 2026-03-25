@@ -301,6 +301,10 @@ export class GameEngine {
         updateHpBar(mesh.hpBar, hp);
     }
 
+    hasRemoteTank(id: string): boolean {
+        return this.remoteTanks.has(id);
+    }
+
     removeRemoteTank(id: string) {
         const remote = this.remoteTanks.get(id);
         if (remote) {
@@ -846,12 +850,12 @@ export class GameEngine {
 
     // ─── Deathmatch Respawn ─────────────────────────────────────────
 
-    respawnForDeathmatch(playerId: string) {
+    respawnForDeathmatch(playerId: string, color?: string): string {
         const spawns = getSpawnPoints(this.config);
         const spawnIndex = Math.floor(Math.random() * spawns.length);
         const spawn = spawns[spawnIndex];
         const hp = this.config.maxHp;
-        const newColor = TANK_COLORS[Math.floor(Math.random() * TANK_COLORS.length)];
+        const newColor = color || TANK_COLORS[Math.floor(Math.random() * TANK_COLORS.length)];
 
         if (playerId === this.localId) {
             this.localAlive = true;
@@ -892,6 +896,7 @@ export class GameEngine {
                 remote.spawnAnim = 0;
             }
         }
+        return newColor;
     }
 
     getGameMode(): GameMode {

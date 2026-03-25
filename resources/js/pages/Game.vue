@@ -589,7 +589,20 @@ async function joinChannel(code: string) {
             if (p) p.ready = data.ready;
         },
         onTankState(state: TankState) {
-            engine?.updateRemoteTankState(state);
+            if (!engine) return;
+            // Auto-add tank if we don't have it yet (late join / spectator timing)
+            if (!engine.hasRemoteTank(state.id) && state.id !== localId.value) {
+                const p = players.find(p => p.id === state.id);
+                if (p) {
+                    engine.addRemoteTank(state.id, {
+                        id: p.id,
+                        name: p.name,
+                        color: p.color,
+                        isAdmin: p.isAdmin,
+                    }, 0, { x: state.x, z: state.z, rotation: state.bodyRotation, hp: state.hp });
+                }
+            }
+            engine.updateRemoteTankState(state);
         },
         onFire(event: FireEvent) {
             engine?.spawnRemoteProjectile(event);
@@ -698,7 +711,7 @@ async function joinChannel(code: string) {
             engine?.applyRemoteFreeze(data.activatorId);
         },
         onDeathmatchRespawn(data) {
-            engine?.respawnForDeathmatch(data.id);
+            engine?.respawnForDeathmatch(data.id, data.color);
         },
         onWallRotation(data) {
             // Non-admin receives: just execute
@@ -1050,10 +1063,10 @@ async function handleDeathmatchLocalDeath(killerId: string) {
 
     // Respawn
     if (phase.value === 'playing' && engine) {
-        engine.respawnForDeathmatch(localId.value);
+        const newColor = engine.respawnForDeathmatch(localId.value);
         alive.value = true;
         myHp.value = DEFAULT_CONFIG.maxHp;
-        network?.sendDeathmatchRespawn({ id: localId.value });
+        network?.sendDeathmatchRespawn({ id: localId.value, color: newColor });
     }
 }
 
