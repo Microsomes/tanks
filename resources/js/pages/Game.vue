@@ -59,6 +59,8 @@ const dmTotalKills = reactive<Record<string, number>>({});
 const wallShiftWarning = ref('');
 const arenaShrinkWarning = ref(false);
 let pendingWallRotationMap = '';
+const showRenameInput = ref(false);
+const renameValue = ref('');
 let disconnectInterval: number | null = null;
 const rematchRequested = ref(false);
 const rematchRequestedBy = reactive<Set<string>>(new Set());
@@ -88,6 +90,18 @@ let currentSpawnAssignments: Record<string, number> = {};
 const uiAudio = new AudioManager();
 
 const MAX_PLAYERS = 8;
+
+const RANDOM_ADJECTIVES = ['Swift','Angry','Sneaky','Brave','Iron','Ghost','Neon','Pixel','Turbo','Flame','Steel','Shadow','Cosmic','Rogue','Storm'];
+const RANDOM_NOUNS = ['Tank','Cannon','Blaster','Gunner','Reaper','Sniper','Bomber','Ace','Titan','Wolf','Hawk','Fury','Bullet','Rocket','Viper'];
+function randomName(): string {
+    const adj = RANDOM_ADJECTIVES[Math.floor(Math.random() * RANDOM_ADJECTIVES.length)];
+    const noun = RANDOM_NOUNS[Math.floor(Math.random() * RANDOM_NOUNS.length)];
+    return `${adj}${noun}${Math.floor(Math.random() * 100)}`;
+}
+
+const dmAutoJoinUrl = computed(() => {
+    return `${window.location.origin}?mode=dm`;
+});
 
 // ─── Computed ────────────────────────────────────────────────────
 const alivePlayers = computed(() => {
@@ -967,6 +981,35 @@ function checkWinCondition() {
     }
 }
 
+// ─── Rename (R key) ─────────────────────────────────────────────
+function handleKeyDown(e: KeyboardEvent) {
+    if (phase.value !== 'playing') return;
+    if (showRenameInput.value) return;
+    if (e.key === 'r' || e.key === 'R') {
+        showRenameInput.value = true;
+        renameValue.value = nickname.value;
+        e.preventDefault();
+    }
+}
+
+function confirmRename() {
+    const newName = renameValue.value.trim();
+    if (!newName || newName.length > 20) return;
+    const oldName = nickname.value;
+    nickname.value = newName;
+    // Update local player in list
+    const me = players.find(p => p.id === localId.value);
+    if (me) me.name = newName;
+    // Announce via kill feed
+    killFeed.push({ killer: 'SYSTEM', target: `${oldName} is now ${newName}`, time: Date.now() });
+    if (killFeed.length > 5) killFeed.shift();
+    showRenameInput.value = false;
+}
+
+function cancelRename() {
+    showRenameInput.value = false;
+}
+
 // ─── Ghost Tank Cleanup ─────────────────────────────────────────
 function handleStaleTank(id: string) {
     const player = players.find(p => p.id === id);
@@ -1194,6 +1237,7 @@ function handleBeforeUnload() {
 
 onMounted(async () => {
     window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('keydown', handleKeyDown);
     uiAudio.load();
     isTouchDevice.value = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
@@ -1269,6 +1313,14 @@ onMounted(async () => {
     }
 
     const params = new URLSearchParams(window.location.search);
+    const mode = params.get('mode');
+    if (mode === 'dm') {
+        // Auto-join deathmatch with random name
+        nickname.value = randomName();
+        selectedColor.value = TANK_COLORS[Math.floor(Math.random() * TANK_COLORS.length)];
+        joinDeathmatch();
+        return;
+    }
     const code = params.get('code');
     if (code && code.length === 4) {
         roomCodeInput.value = code.toUpperCase();
@@ -1278,6 +1330,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
     window.removeEventListener('beforeunload', handleBeforeUnload);
+    window.removeEventListener('keydown', handleKeyDown);
     if (isAdmin.value && roomCode.value && gameMode.value !== 'deathmatch') {
         apiPost('/api/game/room/unregister', { room_code: roomCode.value });
     }
@@ -1471,6 +1524,16 @@ function toggleReady() {
                     >
                         DEATHMATCH
                     </button>
+                </div>
+
+                <!-- Quick DM link -->
+                <div class="flex items-center gap-2 px-3 py-2 bg-gray-800/50 border border-gray-700/50 rounded-lg">
+                    <span class="text-gray-500 text-xs font-mono shrink-0">Quick join:</span>
+                    <code class="text-red-400 text-xs font-mono truncate flex-1">{{ dmAutoJoinUrl }}</code>
+                    <button
+                        @click="navigator.clipboard.writeText(dmAutoJoinUrl)"
+                        class="text-gray-500 hover:text-white text-xs font-mono shrink-0 px-2 py-0.5 border border-gray-600 rounded transition-colors"
+                    >COPY</button>
                 </div>
 
                 <div class="flex items-center gap-3">
@@ -1829,6 +1892,26 @@ function toggleReady() {
             <div class="px-6 py-3 bg-orange-500/30 border border-orange-500/50 rounded-lg animate-pulse text-center">
                 <p class="text-orange-400 font-mono text-2xl font-black">ARENA SHRINKING</p>
                 <p class="text-gray-400 font-mono text-xs mt-1">Get to the center!</p>
+            </div>
+        </div>
+
+        <!-- Rename Input (R key) -->
+        <div v-if="showRenameInput" class="absolute inset-0 flex items-center justify-center bg-black/50 z-20">
+            <div class="bg-gray-900 border border-gray-600 rounded-lg p-4 min-w-[280px]">
+                <p class="text-gray-400 font-mono text-xs mb-2">NEW NAME</p>
+                <input
+                    ref="renameInputRef"
+                    v-model="renameValue"
+                    @keydown.enter="confirmRename"
+                    @keydown.escape="cancelRename"
+                    maxlength="20"
+                    class="w-full px-3 py-2 bg-gray-800 border border-gray-600 text-white font-mono rounded text-sm focus:outline-none focus:border-emerald-400"
+                    autofocus
+                />
+                <div class="flex gap-2 mt-3">
+                    <button @click="confirmRename" class="flex-1 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-black font-mono text-sm font-bold rounded transition-colors">RENAME</button>
+                    <button @click="cancelRename" class="flex-1 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 font-mono text-sm rounded transition-colors">CANCEL</button>
+                </div>
             </div>
         </div>
 
