@@ -349,6 +349,7 @@ async function spectateRoom(code: string, mapName: string) {
     roomCode.value = code;
     isAdmin.value = false;
     selectedMap.value = mapName as MapName;
+    gameMode.value = code === DEATHMATCH_ROOM ? 'deathmatch' : 'classic';
     await joinChannel(code);
 
     // Go straight to playing phase as spectator
@@ -382,18 +383,29 @@ async function spectateRoom(code: string, mapName: string) {
         onGulag() {},
         onStaleTank(id) { handleStaleTank(id); },
         onFreeze() {},
-        onWallRotation() {},
-        onWallRotationWarning() {},
-        onArenaShrink() {},
-        onArenaShrinkWarning() {},
-    }, undefined, mapName as MapName);
+        onWallRotation(data) {
+            engine?.executeWallRotation(data.mapName as any);
+        },
+        onWallRotationWarning(data) {
+            wallShiftWarning.value = data.mapName;
+            setTimeout(() => { wallShiftWarning.value = ''; }, 3000);
+        },
+        onArenaShrink(data) {
+            engine?.setArenaShrinkPhase(data.phase, data.targetScale);
+        },
+        onArenaShrinkWarning() {
+            arenaShrinkWarning.value = true;
+            setTimeout(() => { arenaShrinkWarning.value = false; }, 3000);
+        },
+    }, undefined, mapName as MapName, (code === DEATHMATCH_ROOM ? 'deathmatch' : 'classic'));
 
     engine.init();
     // Hide local tank — spectator has no tank
     engine.spawnLocal(0);
     engine.setSpectateMode(true);
 
-    // Add all current players as remote tanks
+    // Add all current players as remote tanks (defer slightly to let presence sync)
+    await new Promise(r => setTimeout(r, 200));
     for (const p of players) {
         if (p.id !== localId.value) {
             engine.addRemoteTank(p.id, {
@@ -401,7 +413,7 @@ async function spectateRoom(code: string, mapName: string) {
                 name: p.name,
                 color: p.color,
                 isAdmin: p.isAdmin,
-            }, 0);
+            }, Math.floor(Math.random() * 8));
         }
     }
 
