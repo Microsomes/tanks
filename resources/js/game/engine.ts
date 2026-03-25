@@ -801,6 +801,60 @@ export class GameEngine {
         }
     }
 
+    private movingWallDamageTick = 0;
+
+    private checkMovingWallDamage(dt: number) {
+        if (!this.localAlive || this.spectateMode) return;
+
+        // Check if local tank overlaps any moving wall
+        let touching = false;
+        for (const mw of this.movingWalls) {
+            const w = mw.wall.data;
+            const halfW = w.width / 2 + 1.0; // slightly larger than tank radius
+            const halfD = w.depth / 2 + 1.0;
+            if (
+                this.localX > w.x - halfW && this.localX < w.x + halfW &&
+                this.localZ > w.z - halfD && this.localZ < w.z + halfD
+            ) {
+                touching = true;
+                break;
+            }
+        }
+
+        if (!touching) {
+            this.movingWallDamageTick = 0;
+            return;
+        }
+
+        // Damage every 0.4s while touching
+        this.movingWallDamageTick += dt;
+        if (this.movingWallDamageTick < 0.4) return;
+        this.movingWallDamageTick = 0;
+
+        if (this.hasEffect('shield')) {
+            this.activeEffects = this.activeEffects.filter(e => e.type !== 'shield');
+            this.callbacks.onEffectsChange([...this.activeEffects]);
+            this.audio.play('shield_break', 0.4);
+            return;
+        }
+
+        this.localHp = Math.max(0, this.localHp - 1);
+        updateHpBar(this.localTank.hpBar, this.localHp);
+        this.callbacks.onHpChange(this.localHp);
+        this.flashTank(this.localTank);
+        this.audio.play('hit', 0.3);
+        this.shakeCamera(0.3);
+
+        if (this.localHp <= 0) {
+            this.localAlive = false;
+            this.localTank.group.visible = false;
+            createExplosion(this.scene, this.localX, this.localZ, this.localInfo.color);
+            this.audio.play('explosion', 0.6);
+            this.callbacks.onDeath({ id: this.localId, killerId: 'wall' });
+            this.callbacks.onKill('WALL', this.localInfo.name);
+        }
+    }
+
     getArenaShrinkScale(): number {
         return this.arenaShrinkScale;
     }
@@ -1019,6 +1073,7 @@ export class GameEngine {
             if (this.movingWalls.length > 0) {
                 updateMovingWalls(this.movingWalls, dt);
                 this.rebuildWallData();
+                this.checkMovingWallDamage(dt);
             }
         }
 
