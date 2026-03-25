@@ -1336,7 +1336,11 @@ export class GameEngine {
                     this.projectiles.splice(i, 1);
                     hitRemote = true;
                     this.audio.play('hit', 0.3);
-                    this.shakeCamera(0.15); // feedback shake when landing a hit
+                    this.shakeCamera(0.15);
+                    // Immediate visual HP update on shooter's screen (authoritative HP stays with target)
+                    remote.hp = Math.max(0, remote.hp - (proj.damage || 1));
+                    updateHpBar(remote.mesh.hpBar, remote.hp);
+                    this.flashTank(remote.mesh);
                     break;
                 }
             }
