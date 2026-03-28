@@ -33,6 +33,7 @@ export interface NetworkCallbacks {
     onWallRotationWarning: (data: { mapName: string }) => void;
     onArenaShrink: (data: { phase: string; targetScale: number }) => void;
     onArenaShrinkWarning: () => void;
+    onHazardSpawn: (data: { x: number; z: number; radius: number }) => void;
 }
 
 /**
@@ -192,6 +193,9 @@ export class GameNetwork {
                 })
                 .listenForWhisper('arena-shrink-warning', () => {
                     this.callbacks.onArenaShrinkWarning();
+                })
+                .listenForWhisper('hazard-spawn', (data: { x: number; z: number; radius: number }) => {
+                    this.callbacks.onHazardSpawn(data);
                 });
         });
     }
@@ -306,6 +310,10 @@ export class GameNetwork {
 
     sendArenaShrinkWarning() {
         this.channel?.whisper('arena-shrink-warning', {});
+    }
+
+    sendHazardSpawn(data: { x: number; z: number; radius: number }) {
+        this.channel?.whisper('hazard-spawn', data);
     }
 
     leave() {

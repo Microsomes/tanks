@@ -72,6 +72,8 @@ export interface GameEngineCallbacks {
     onWallRotationWarning: (data: { mapName: string }) => void;
     onArenaShrink: (data: { phase: string; targetScale: number }) => void;
     onArenaShrinkWarning: () => void;
+    onKillStreak: (streak: number, playerName: string) => void;
+    onHazardSpawn: (data: { x: number; z: number; radius: number }) => void;
 }
 
 export class GameEngine {
@@ -170,6 +172,26 @@ export class GameEngine {
     private shrinkZoneMeshes: THREE.Mesh[] = [];
     private nextShrinkDelay = 0;
 
+    // Kill streak tracking
+    private killStreakCount = 0;
+    private killStreakTimer = 0;
+    private readonly KILL_STREAK_WINDOW = 5; // seconds to chain kills
+
+    // Bounty system
+    private bountyTargetId = '';
+    private bountyGlowMesh: THREE.Mesh | null = null;
+
+    // Hazard zones (artillery strikes)
+    private hazardZones: { x: number; z: number; radius: number; timer: number; mesh: THREE.Mesh; warningMesh: THREE.Mesh; active: boolean }[] = [];
+    private hazardSpawnTimer = 0;
+    private readonly HAZARD_INTERVAL = 20; // seconds between strikes
+    private readonly HAZARD_WARN_TIME = 2; // seconds warning before damage
+    private readonly HAZARD_ACTIVE_TIME = 3; // seconds of damage
+    private hazardDamageTick = 0;
+
+    // Speed boost pads
+    private speedPads: { x: number; z: number; mesh: THREE.Mesh }[] = [];
+
     constructor(
         private canvas: HTMLCanvasElement,
         localId: string,
@@ -220,9 +242,10 @@ export class GameEngine {
             this.interiorWalls = arena.interiorWalls;
             this.walls = arena.allWallData;
 
-            // Moving walls (deathmatch only)
+            // Moving walls & speed pads (deathmatch only)
             if (this.gameMode === 'deathmatch') {
                 this.movingWalls = createMovingWalls(this.scene, this.config);
+                this.createSpeedPads();
             }
 
             // Local tank
@@ -855,6 +878,261 @@ export class GameEngine {
         }
     }
 
+    // ─── Kill Streaks ─────────────────────────────────────────────
+
+    registerKill(killerName: string) {
+        this.killStreakCount++;
+        this.killStreakTimer = this.KILL_STREAK_WINDOW;
+        if (this.killStreakCount >= 2) {
+            this.callbacks.onKillStreak(this.killStreakCount, killerName);
+        }
+    }
+
+    private updateKillStreak(dt: number) {
+        if (this.killStreakTimer > 0) {
+            this.killStreakTimer -= dt;
+            if (this.killStreakTimer <= 0) {
+                this.killStreakCount = 0;
+            }
+        }
+    }
+
+    // ─── Bounty System ──────────────────────────────────────────
+
+    updateBountyTarget(leaderId: string) {
+        if (leaderId === this.bountyTargetId) return;
+        // Remove old glow
+        if (this.bountyGlowMesh) {
+            this.scene.remove(this.bountyGlowMesh);
+            this.bountyGlowMesh.geometry.dispose();
+            (this.bountyGlowMesh.material as THREE.Material).dispose();
+            this.bountyGlowMesh = null;
+        }
+        this.bountyTargetId = leaderId;
+    }
+
+    private updateBountyGlow(_dt: number) {
+        if (!this.bountyTargetId) return;
+
+        const remote = this.remoteTanks.get(this.bountyTargetId);
+        const isLocal = this.bountyTargetId === this.localId;
+
+        if (!this.bountyGlowMesh) {
+            const geo = new THREE.RingGeometry(1.6, 2.0, 24);
+            const mat = new THREE.MeshBasicMaterial({
+                color: 0xffd700,
+                transparent: true,
+                opacity: 0.6,
+                side: THREE.DoubleSide,
+                depthWrite: false,
+            });
+            this.bountyGlowMesh = new THREE.Mesh(geo, mat);
+            this.bountyGlowMesh.rotation.x = -Math.PI / 2;
+            this.bountyGlowMesh.position.y = 0.05;
+            this.scene.add(this.bountyGlowMesh);
+        }
+
+        // Pulse
+        const pulse = 0.6 + Math.sin(performance.now() * 0.004) * 0.2;
+        (this.bountyGlowMesh.material as THREE.MeshBasicMaterial).opacity = pulse;
+
+        if (isLocal && this.localAlive) {
+            this.bountyGlowMesh.position.set(this.localX, 0.05, this.localZ);
+            this.bountyGlowMesh.visible = true;
+        } else if (remote?.alive) {
+            this.bountyGlowMesh.position.set(remote.mesh.group.position.x, 0.05, remote.mesh.group.position.z);
+            this.bountyGlowMesh.visible = true;
+        } else {
+            this.bountyGlowMesh.visible = false;
+        }
+    }
+
+    isBountyTarget(playerId: string): boolean {
+        return playerId === this.bountyTargetId;
+    }
+
+    // ─── Hazard Zones (Artillery) ────────────────────────────────
+
+    private adminSpawnHazards(dt: number) {
+        this.hazardSpawnTimer += dt;
+        if (this.hazardSpawnTimer < this.HAZARD_INTERVAL) return;
+        this.hazardSpawnTimer = 0;
+
+        // Spawn 2-3 hazard zones at random positions
+        const count = 2 + Math.floor(Math.random() * 2);
+        for (let i = 0; i < count; i++) {
+            const halfW = this.config.arenaWidth / 2 * this.arenaShrinkScale - 5;
+            const halfH = this.config.arenaHeight / 2 * this.arenaShrinkScale - 5;
+            const x = (Math.random() - 0.5) * 2 * halfW;
+            const z = (Math.random() - 0.5) * 2 * halfH;
+            const radius = 3 + Math.random() * 3;
+            this.spawnHazardZone(x, z, radius);
+            this.callbacks.onHazardSpawn({ x, z, radius });
+        }
+    }
+
+    spawnHazardZone(x: number, z: number, radius: number) {
+        // Warning ring (pulsing)
+        const warnGeo = new THREE.RingGeometry(radius - 0.3, radius, 32);
+        const warnMat = new THREE.MeshBasicMaterial({
+            color: 0xff4400,
+            transparent: true,
+            opacity: 0.5,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+        });
+        const warningMesh = new THREE.Mesh(warnGeo, warnMat);
+        warningMesh.rotation.x = -Math.PI / 2;
+        warningMesh.position.set(x, 0.04, z);
+        this.scene.add(warningMesh);
+
+        // Damage circle (hidden initially)
+        const dmgGeo = new THREE.CircleGeometry(radius, 32);
+        const dmgMat = new THREE.MeshBasicMaterial({
+            color: 0xff2200,
+            transparent: true,
+            opacity: 0.0,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+        });
+        const mesh = new THREE.Mesh(dmgGeo, dmgMat);
+        mesh.rotation.x = -Math.PI / 2;
+        mesh.position.set(x, 0.03, z);
+        this.scene.add(mesh);
+
+        this.hazardZones.push({ x, z, radius, timer: 0, mesh, warningMesh, active: false });
+    }
+
+    private updateHazardZones(dt: number) {
+        for (let i = this.hazardZones.length - 1; i >= 0; i--) {
+            const hz = this.hazardZones[i];
+            hz.timer += dt;
+
+            if (hz.timer < this.HAZARD_WARN_TIME) {
+                // Warning phase — pulse the ring
+                const pulse = 0.3 + Math.sin(hz.timer * 8) * 0.3;
+                (hz.warningMesh.material as THREE.MeshBasicMaterial).opacity = pulse;
+            } else if (hz.timer < this.HAZARD_WARN_TIME + this.HAZARD_ACTIVE_TIME) {
+                // Active damage phase
+                if (!hz.active) {
+                    hz.active = true;
+                    (hz.mesh.material as THREE.MeshBasicMaterial).opacity = 0.25;
+                    (hz.warningMesh.material as THREE.MeshBasicMaterial).opacity = 0.7;
+                }
+                // Fade out toward end
+                const remaining = (this.HAZARD_WARN_TIME + this.HAZARD_ACTIVE_TIME) - hz.timer;
+                (hz.mesh.material as THREE.MeshBasicMaterial).opacity = Math.min(0.25, remaining * 0.5);
+            } else {
+                // Remove
+                this.scene.remove(hz.mesh);
+                this.scene.remove(hz.warningMesh);
+                hz.mesh.geometry.dispose();
+                (hz.mesh.material as THREE.Material).dispose();
+                hz.warningMesh.geometry.dispose();
+                (hz.warningMesh.material as THREE.Material).dispose();
+                this.hazardZones.splice(i, 1);
+            }
+        }
+    }
+
+    private checkHazardDamage(dt: number) {
+        if (!this.localAlive || this.spectateMode) return;
+
+        let inHazard = false;
+        for (const hz of this.hazardZones) {
+            if (!hz.active) continue;
+            const dx = this.localX - hz.x;
+            const dz = this.localZ - hz.z;
+            if (dx * dx + dz * dz < hz.radius * hz.radius) {
+                inHazard = true;
+                break;
+            }
+        }
+        if (!inHazard) {
+            this.hazardDamageTick = 0;
+            return;
+        }
+
+        this.hazardDamageTick += dt;
+        if (this.hazardDamageTick < 0.3) return;
+        this.hazardDamageTick = 0;
+
+        if (this.hasEffect('shield')) {
+            this.activeEffects = this.activeEffects.filter(e => e.type !== 'shield');
+            this.callbacks.onEffectsChange([...this.activeEffects]);
+            this.audio.play('shield_break', 0.4);
+            return;
+        }
+
+        this.localHp = Math.max(0, this.localHp - 1);
+        updateHpBar(this.localTank.hpBar, this.localHp);
+        this.callbacks.onHpChange(this.localHp);
+        this.flashTank(this.localTank);
+        this.shakeCamera(0.2);
+        this.audio.play('hit', 0.2);
+
+        if (this.localHp <= 0) {
+            this.localAlive = false;
+            this.localTank.group.visible = false;
+            createExplosion(this.scene, this.localX, this.localZ, this.localInfo.color);
+            this.audio.play('explosion', 0.6);
+            this.callbacks.onDeath({ id: this.localId, killerId: 'hazard' });
+            this.callbacks.onKill('AIRSTRIKE', this.localInfo.name);
+        }
+    }
+
+    // ─── Speed Boost Pads ────────────────────────────────────────
+
+    private createSpeedPads() {
+        const { arenaWidth: W, arenaHeight: H } = this.config;
+        const positions = [
+            { x: 0, z: 0 },                           // center
+            { x: W * 0.25, z: H * 0.2 },
+            { x: -W * 0.25, z: -H * 0.2 },
+            { x: W * 0.2, z: -H * 0.25 },
+            { x: -W * 0.2, z: H * 0.25 },
+        ];
+
+        const geo = new THREE.CircleGeometry(2, 16);
+        for (const pos of positions) {
+            const mat = new THREE.MeshBasicMaterial({
+                color: 0x00ffcc,
+                transparent: true,
+                opacity: 0.2,
+                side: THREE.DoubleSide,
+                depthWrite: false,
+            });
+            const mesh = new THREE.Mesh(geo.clone(), mat);
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.position.set(pos.x, 0.02, pos.z);
+            this.scene.add(mesh);
+            this.speedPads.push({ x: pos.x, z: pos.z, mesh });
+        }
+    }
+
+    private checkSpeedPads() {
+        if (!this.localAlive || this.hasEffect('speed_boost')) return;
+
+        for (const pad of this.speedPads) {
+            const dx = this.localX - pad.x;
+            const dz = this.localZ - pad.z;
+            if (dx * dx + dz * dz < 4) { // radius 2
+                // Apply brief speed boost (3 seconds)
+                this.activeEffects.push({ type: 'speed_boost' as any, expiresAt: performance.now() + 3000 });
+                this.callbacks.onEffectsChange([...this.activeEffects]);
+                break;
+            }
+        }
+    }
+
+    private updateSpeedPadVisuals() {
+        const t = performance.now() * 0.003;
+        for (const pad of this.speedPads) {
+            const pulse = 0.15 + Math.sin(t + pad.x) * 0.08;
+            (pad.mesh.material as THREE.MeshBasicMaterial).opacity = pulse;
+        }
+    }
+
     getArenaShrinkScale(): number {
         return this.arenaShrinkScale;
     }
@@ -1004,6 +1282,23 @@ export class GameEngine {
         removeWallObjects(this.boundaryWalls, this.scene);
         removeMovingWalls(this.movingWalls, this.scene);
         this.removeShrinkZoneOverlay();
+        // Cleanup hazard zones
+        for (const hz of this.hazardZones) {
+            this.scene.remove(hz.mesh); this.scene.remove(hz.warningMesh);
+            hz.mesh.geometry.dispose(); (hz.mesh.material as THREE.Material).dispose();
+            hz.warningMesh.geometry.dispose(); (hz.warningMesh.material as THREE.Material).dispose();
+        }
+        this.hazardZones = [];
+        // Cleanup speed pads
+        for (const pad of this.speedPads) {
+            this.scene.remove(pad.mesh); pad.mesh.geometry.dispose(); (pad.mesh.material as THREE.Material).dispose();
+        }
+        this.speedPads = [];
+        // Cleanup bounty glow
+        if (this.bountyGlowMesh) {
+            this.scene.remove(this.bountyGlowMesh);
+            this.bountyGlowMesh.geometry.dispose(); (this.bountyGlowMesh.material as THREE.Material).dispose();
+        }
         window.removeEventListener('resize', this.onResize);
         this.renderer?.dispose();
     }
@@ -1068,6 +1363,12 @@ export class GameEngine {
             }
             this.updateArenaShrink(dt);
             this.checkShrinkDamage(dt);
+            this.updateKillStreak(dt);
+            this.updateBountyGlow(dt);
+            this.updateHazardZones(dt);
+            this.checkHazardDamage(dt);
+            this.checkSpeedPads();
+            this.updateSpeedPadVisuals();
 
             // Moving walls
             if (this.movingWalls.length > 0) {
@@ -1469,7 +1770,8 @@ export class GameEngine {
     private adminSpawnPowerups(dt: number) {
         this.powerupSpawnTimer += dt * 1000;
         if (this.powerupSpawnTimer < this.nextSpawnDelay) return;
-        if (this.powerups.length + 2 > POWERUP_CONFIG.maxOnField) {
+        const maxPowerups = this.gameMode === 'deathmatch' ? 12 : POWERUP_CONFIG.maxOnField;
+        if (this.powerups.length + 2 > maxPowerups) {
             this.powerupSpawnTimer = 0;
             return;
         }
@@ -1591,8 +1893,9 @@ export class GameEngine {
     }
 
     private randomSpawnDelay(): number {
-        return POWERUP_CONFIG.spawnIntervalMin +
-            Math.random() * (POWERUP_CONFIG.spawnIntervalMax - POWERUP_CONFIG.spawnIntervalMin);
+        const min = this.gameMode === 'deathmatch' ? 2000 : POWERUP_CONFIG.spawnIntervalMin;
+        const max = this.gameMode === 'deathmatch' ? 4000 : POWERUP_CONFIG.spawnIntervalMax;
+        return min + Math.random() * (max - min);
     }
 
     // ─── New Effect Logic ────────────────────────────────────────────

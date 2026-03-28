@@ -61,6 +61,8 @@ const arenaShrinkWarning = ref(false);
 let pendingWallRotationMap = '';
 const showRenameInput = ref(false);
 const renameValue = ref('');
+const killStreakText = ref('');
+const killStreakTimeout: { value: ReturnType<typeof setTimeout> | null } = { value: null };
 let disconnectInterval: number | null = null;
 const rematchRequested = ref(false);
 const rematchRequestedBy = reactive<Set<string>>(new Set());
@@ -267,6 +269,11 @@ async function joinDeathmatch() {
             const target = players.find(p => p.name === targetName);
             if (killer) gameKills[killer.id] = (gameKills[killer.id] || 0) + 1;
             if (target) gameDeaths[target.id] = (gameDeaths[target.id] || 0) + 1;
+            // Kill streak tracking (local player kills)
+            if (killerName === nickname.value && engine) {
+                engine.registerKill(killerName);
+            }
+            updateBounty();
         },
         onPowerupSpawn(event) { network?.sendPowerupSpawn(event); },
         onPowerupPickup(event) { network?.sendPowerupPickup(event); },
@@ -296,6 +303,8 @@ async function joinDeathmatch() {
             arenaShrinkWarning.value = true;
             setTimeout(() => { arenaShrinkWarning.value = false; }, 3000);
         },
+        onKillStreak(streak, playerName) { showKillStreak(streak, playerName); },
+        onHazardSpawn(data) { network?.sendHazardSpawn(data); },
     }, DEATHMATCH_ARENA, 'open', 'deathmatch');
 
     engine.init();
@@ -398,6 +407,8 @@ async function spectateRoom(code: string, mapName: string) {
             arenaShrinkWarning.value = true;
             setTimeout(() => { arenaShrinkWarning.value = false; }, 3000);
         },
+        onKillStreak(streak, playerName) { showKillStreak(streak, playerName); },
+        onHazardSpawn() {},
     }, (code === DEATHMATCH_ROOM ? DEATHMATCH_ARENA : undefined), mapName as MapName, (code === DEATHMATCH_ROOM ? 'deathmatch' : 'classic'));
 
     engine.init();
@@ -615,7 +626,9 @@ async function joinChannel(code: string) {
             engine?.handleRemoteDeath(data.id, data.killerId);
             if (gameMode.value === 'deathmatch') {
                 // Track kills in deathmatch
-                dmTotalKills[data.killerId] = (dmTotalKills[data.killerId] || 0) + 1;
+                const bountyBonus = engine?.isBountyTarget(data.id) ? 2 : 1;
+                dmTotalKills[data.killerId] = (dmTotalKills[data.killerId] || 0) + bountyBonus;
+                updateBounty();
                 // Remote player will respawn on their own — no win condition
             } else if (gulagInProgress.value && isAdmin.value) {
                 // Death during gulag = gulag result
@@ -731,6 +744,9 @@ async function joinChannel(code: string) {
             // Non-admin receives: show warning
             arenaShrinkWarning.value = true;
             setTimeout(() => { arenaShrinkWarning.value = false; }, 3000);
+        },
+        onHazardSpawn(data) {
+            engine?.spawnHazardZone(data.x, data.z, data.radius);
         },
     });
 
@@ -910,6 +926,8 @@ async function startGame(countdownSec: number, spawnAssignments: Record<string, 
             arenaShrinkWarning.value = true;
             setTimeout(() => { arenaShrinkWarning.value = false; }, 3000);
         },
+        onKillStreak(streak, playerName) { showKillStreak(streak, playerName); },
+        onHazardSpawn(data) { network?.sendHazardSpawn(data); },
     }, undefined, mapName, gameMode.value);
 
     engine.init();
@@ -1036,6 +1054,28 @@ function cancelRename() {
     showRenameInput.value = false;
 }
 
+// ─── Kill Streaks & Bounty ───────────────────────────────────────
+const STREAK_NAMES: Record<number, string> = {
+    2: 'DOUBLE KILL',
+    3: 'TRIPLE KILL',
+    4: 'ULTRA KILL',
+    5: 'RAMPAGE',
+};
+function showKillStreak(streak: number, playerName: string) {
+    const name = STREAK_NAMES[Math.min(streak, 5)] || `${streak}x KILL`;
+    killStreakText.value = `${playerName}: ${name}`;
+    if (killStreakTimeout.value) clearTimeout(killStreakTimeout.value);
+    killStreakTimeout.value = setTimeout(() => { killStreakText.value = ''; }, 2500);
+}
+
+function updateBounty() {
+    if (gameMode.value !== 'deathmatch' || !engine) return;
+    const leader = dmLeaderboard.value[0];
+    if (leader && leader.kills > 0) {
+        engine.updateBountyTarget(leader.id);
+    }
+}
+
 // ─── Ghost Tank Cleanup ─────────────────────────────────────────
 function handleStaleTank(id: string) {
     const player = players.find(p => p.id === id);
@@ -1051,8 +1091,10 @@ function handleStaleTank(id: string) {
 
 // ─── Deathmatch ─────────────────────────────────────────────────
 async function handleDeathmatchLocalDeath(killerId: string) {
-    // Track the kill
-    dmTotalKills[killerId] = (dmTotalKills[killerId] || 0) + 1;
+    // Track the kill (bounty target = 2x points)
+    const bountyBonus = engine?.isBountyTarget(localId.value) ? 2 : 1;
+    dmTotalKills[killerId] = (dmTotalKills[killerId] || 0) + bountyBonus;
+    updateBounty();
 
     // Show respawn countdown
     respawnCountdown.value = DEATHMATCH_CONFIG.respawnDelaySec;
@@ -1907,6 +1949,13 @@ function toggleReady() {
             </div>
         </div>
 
+        <!-- Kill Streak Announcement -->
+        <div v-if="killStreakText" class="absolute top-1/4 left-1/2 -translate-x-1/2 pointer-events-none z-10">
+            <div class="text-center animate-bounce">
+                <p class="text-yellow-400 font-mono text-3xl font-black drop-shadow-[0_0_10px_rgba(255,200,0,0.6)]">{{ killStreakText }}</p>
+            </div>
+        </div>
+
         <!-- Deathmatch Warnings -->
         <div v-if="wallShiftWarning" class="absolute top-1/3 left-1/2 -translate-x-1/2 pointer-events-none z-10">
             <div class="px-6 py-3 bg-red-500/30 border border-red-500/50 rounded-lg animate-pulse text-center">
@@ -1950,10 +1999,10 @@ function toggleReady() {
                     :key="entry.id"
                     class="flex items-center gap-2 py-0.5"
                 >
-                    <span class="text-gray-500 font-mono text-[10px] w-3">{{ i + 1 }}</span>
+                    <span class="font-mono text-[10px] w-3" :class="i === 0 && entry.kills > 0 ? 'text-yellow-400' : 'text-gray-500'">{{ i === 0 && entry.kills > 0 ? '\u2655' : i + 1 }}</span>
                     <div class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: entry.color }"></div>
                     <span class="font-mono text-xs flex-1 truncate"
-                          :class="entry.id === localId ? 'text-white font-bold' : 'text-gray-300'">
+                          :class="[entry.id === localId ? 'text-white font-bold' : 'text-gray-300', i === 0 && entry.kills > 0 ? 'text-yellow-300' : '']">
                         {{ entry.name }}
                     </span>
                     <span class="text-red-400 font-mono text-xs font-bold">{{ entry.kills }}</span>
